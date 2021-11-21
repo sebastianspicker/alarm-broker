@@ -3,10 +3,13 @@
 A working tree for alarm-broker with an evolving implementation history.
 
 ## Overview
-alarm-broker is moving through bootstrap push work.
+alarm-broker tracks the practical state of the current maintenance pass.
 
 ## Status
-Lifecycle stage: bootstrap.
+Lifecycle stage: bootstrap. Activity resumed after a longer gap.
 
 ## Development
 - Reduced surprise in the docker release checks.
+
+## Usage
+- Merged scattered docker guidance into the docs.
