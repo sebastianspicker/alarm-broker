@@ -10,3 +10,5 @@ def core_task() -> dict[str, str]:
 # current lane: dispatch
 def dispatch_task() -> dict[str, str]:
     return {"scope": "dispatch", "status": "ready"}
+
+# forced-dispatch-3
