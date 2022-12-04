@@ -12,3 +12,7 @@ def dispatch_task() -> dict[str, str]:
     return {"scope": "dispatch", "status": "ready"}
 
 # forced-dispatch-3
+
+# current lane: state
+def state_pipeline() -> dict[str, str]:
+    return {"scope": "state", "status": "ready"}
