@@ -6,5 +6,3 @@ def build_metrics_summary() -> dict[str, str]:
 # current lane: metrics
 def metrics_task() -> dict[str, str]:
     return {"scope": "metrics", "status": "ready"}
-
-# forced-metrics-2
