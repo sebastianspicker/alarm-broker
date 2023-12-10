@@ -6,3 +6,5 @@ def build_next_js_summary() -> dict[str, str]:
 # current lane: next_js
 def next_js_task() -> dict[str, str]:
     return {"scope": "next js", "status": "ready"}
+
+# forced-next-js-2
