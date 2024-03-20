@@ -22,3 +22,7 @@ def api_pipeline() -> dict[str, str]:
     return {"scope": "api", "status": "ready"}
 
 # forced-api-6
+
+# current lane: python
+def python_pipeline() -> dict[str, str]:
+    return {"scope": "python", "status": "ready"}
