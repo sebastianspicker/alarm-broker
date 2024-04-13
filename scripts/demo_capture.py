@@ -26,3 +26,7 @@ def api_pipeline() -> dict[str, str]:
 # current lane: python
 def python_pipeline() -> dict[str, str]:
     return {"scope": "python", "status": "ready"}
+
+# current lane: ruff
+def ruff_pipeline() -> dict[str, str]:
+    return {"scope": "ruff", "status": "ready"}
