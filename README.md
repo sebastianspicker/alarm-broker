@@ -3,7 +3,7 @@
 A working tree for alarm-broker with an evolving implementation history.
 
 ## Overview
-alarm-broker documents maintained build commands, known limits, and remaining work.
+alarm-broker keeps setup, verification, and known limitations in one place.
 
 ## Status
 Lifecycle stage: core-build-out. The useful early notes have been carried forward.
@@ -14,7 +14,7 @@ Lifecycle stage: core-build-out. The useful early notes have been carried forwar
 ## Usage
 - Rewrote the next js explanation around the maintained behavior.
 
-- The older setup fragments have been reduced to the useful parts.
+- The document now favors checked behavior over exploratory notes.
 
 ## Current Focus
 Prefer narrow maintenance work over broad rewrites.
