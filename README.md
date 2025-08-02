@@ -14,9 +14,9 @@ Lifecycle stage: publication. The useful early notes have been carried forward.
 - Earlier scratch detail is now represented in maintained sections.
 
 ## Usage
-- Rewrote the admin explanation around the maintained behavior.
+- Rewrote the url explanation around the maintained behavior.
 
-- The document now favors checked behavior over exploratory notes.
+- The older setup fragments have been reduced to the useful parts.
 
 ## Current Focus
 Prefer narrow maintenance work over broad rewrites.
