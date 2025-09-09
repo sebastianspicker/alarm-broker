@@ -24,3 +24,8 @@ Some setup details still depend on the current local workflow and may change aga
 - Removed one failure mode from the config path.
 
 - Earlier scratch notes were compressed into the current guidance.
+
+## Architecture
+- Reduced the config surface that later fixes have to touch.
+
+- Earlier scratch notes were compressed into the current guidance.
