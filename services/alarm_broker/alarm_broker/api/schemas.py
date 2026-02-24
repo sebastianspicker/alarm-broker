@@ -98,3 +98,22 @@ class AlarmNoteOut(BaseModel):
     note_type: str
 
     model_config = {"from_attributes": True}
+
+
+class BulkAckIn(BaseModel):
+    alarm_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
+    acked_by: str | None = Field(default=None, max_length=120)
+    note: str | None = Field(default=None, max_length=2000)
+
+
+class BulkTransitionIn(BaseModel):
+    alarm_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
+    actor: str | None = Field(default=None, max_length=120)
+    note: str | None = Field(default=None, max_length=2000)
+
+
+class BulkOperationOut(BaseModel):
+    requested: int
+    changed: int
+    unchanged: int
+    missing: list[uuid.UUID] = Field(default_factory=list)

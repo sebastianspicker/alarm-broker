@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -202,6 +203,230 @@ async def test_alarm_pagination_cursor(engine, sessionmaker, seeded_db, fake_red
             )
             assert page_2.status_code == 200
             assert len(page_2.json()) >= 1
+
+
+@pytest.mark.asyncio
+async def test_bulk_resolve_reports_changed_unchanged_and_missing(
+    engine, sessionmaker, seeded_db, fake_redis, settings
+):
+    settings.admin_api_key = "dev-admin-key"
+    now = datetime.now(UTC)
+
+    triggered_id = uuid.uuid4()
+    already_resolved_id = uuid.uuid4()
+    missing_id = uuid.uuid4()
+
+    async with sessionmaker() as session:
+        session.add(
+            Alarm(
+                id=triggered_id,
+                status=AlarmStatus.TRIGGERED,
+                source="test",
+                event="alarm.trigger",
+                person_id="ma-012",
+                room_id="bg-1.23",
+                site_id="bg",
+                device_id="ylk-t5-10023",
+                severity="P0",
+                silent=True,
+                ack_token="bulk-resolve-triggered",
+                created_at=now,
+                meta={},
+            )
+        )
+        session.add(
+            Alarm(
+                id=already_resolved_id,
+                status=AlarmStatus.RESOLVED,
+                source="test",
+                event="alarm.trigger",
+                person_id="ma-012",
+                room_id="bg-1.23",
+                site_id="bg",
+                device_id="ylk-t5-10023",
+                severity="P0",
+                silent=True,
+                ack_token="bulk-resolve-already",
+                created_at=now - timedelta(minutes=1),
+                resolved_at=now - timedelta(minutes=1),
+                resolved_by="Ops",
+                meta={},
+            )
+        )
+        await session.commit()
+
+    app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/v1/alarms/bulk/resolve",
+                headers={"X-Admin-Key": "dev-admin-key"},
+                json={
+                    "alarm_ids": [str(triggered_id), str(already_resolved_id), str(missing_id)],
+                    "actor": "BulkOps",
+                    "note": "batch resolution",
+                },
+            )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["requested"] == 3
+    assert payload["changed"] == 1
+    assert payload["unchanged"] == 1
+    assert payload["missing"] == [str(missing_id)]
+
+    async with sessionmaker() as session:
+        updated = await session.get(Alarm, triggered_id)
+        assert updated is not None
+        assert updated.status == AlarmStatus.RESOLVED
+        assert updated.resolved_by == "BulkOps"
+
+
+@pytest.mark.asyncio
+async def test_bulk_ack_enqueues_jobs_only_for_newly_acknowledged(
+    engine, sessionmaker, seeded_db, fake_redis, settings
+):
+    settings.admin_api_key = "dev-admin-key"
+    now = datetime.now(UTC)
+
+    triggered_id = uuid.uuid4()
+    acknowledged_id = uuid.uuid4()
+
+    async with sessionmaker() as session:
+        session.add(
+            Alarm(
+                id=triggered_id,
+                status=AlarmStatus.TRIGGERED,
+                source="test",
+                event="alarm.trigger",
+                person_id="ma-012",
+                room_id="bg-1.23",
+                site_id="bg",
+                device_id="ylk-t5-10023",
+                severity="P0",
+                silent=True,
+                ack_token="bulk-ack-triggered",
+                created_at=now,
+                meta={},
+            )
+        )
+        session.add(
+            Alarm(
+                id=acknowledged_id,
+                status=AlarmStatus.ACKNOWLEDGED,
+                source="test",
+                event="alarm.trigger",
+                person_id="ma-012",
+                room_id="bg-1.23",
+                site_id="bg",
+                device_id="ylk-t5-10023",
+                severity="P0",
+                silent=True,
+                ack_token="bulk-ack-existing",
+                created_at=now - timedelta(minutes=1),
+                acked_at=now - timedelta(minutes=1),
+                acked_by="Existing",
+                meta={},
+            )
+        )
+        await session.commit()
+
+    app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/v1/alarms/bulk/ack",
+                headers={"X-Admin-Key": "dev-admin-key"},
+                json={
+                    "alarm_ids": [str(triggered_id), str(acknowledged_id)],
+                    "acked_by": "BulkResponder",
+                    "note": "bulk ack note",
+                },
+            )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["requested"] == 2
+    assert payload["changed"] == 1
+    assert payload["unchanged"] == 1
+    assert payload["missing"] == []
+
+    queued_ack_jobs = [job for job in fake_redis.jobs if job[0] == "alarm_acked"]
+    assert len(queued_ack_jobs) == 1
+    assert queued_ack_jobs[0][1][0] == str(triggered_id)
+
+
+@pytest.mark.asyncio
+async def test_metrics_endpoint_exposes_prometheus_text(engine, seeded_db, fake_redis, settings):
+    app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            health_response = await client.get("/healthz")
+            assert health_response.status_code == 200
+
+            metrics_response = await client.get("/metrics")
+
+    assert metrics_response.status_code == 200
+    assert metrics_response.headers["content-type"].startswith("text/plain")
+
+    body = metrics_response.text
+    assert "alarm_broker_http_requests_total" in body
+    assert "alarm_broker_http_request_duration_ms_total" in body
+    assert "alarm_broker_alarms_by_status" in body
+    assert "alarm_broker_notifications_total" in body
+
+    match = re.search(
+        r'alarm_broker_http_requests_total\{method="GET",route="/healthz",status_code="200"\}\s+(\d+)',
+        body,
+    )
+    assert match is not None
+    assert int(match.group(1)) >= 1
+
+
+@pytest.mark.asyncio
+async def test_admin_dashboard_requires_key_and_renders_alarms(
+    engine, sessionmaker, seeded_db, fake_redis, settings
+):
+    settings.admin_api_key = "dev-admin-key"
+    now = datetime.now(UTC)
+    alarm_id = uuid.uuid4()
+
+    async with sessionmaker() as session:
+        session.add(
+            Alarm(
+                id=alarm_id,
+                status=AlarmStatus.TRIGGERED,
+                source="test",
+                event="alarm.trigger",
+                person_id="ma-012",
+                room_id="bg-1.23",
+                site_id="bg",
+                device_id="ylk-t5-10023",
+                severity="P0",
+                silent=True,
+                ack_token="admin-dashboard-alarm",
+                created_at=now,
+                meta={},
+            )
+        )
+        await session.commit()
+
+    app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            unauthorized = await client.get("/admin")
+            authorized = await client.get("/admin", params={"key": "dev-admin-key"})
+
+    assert unauthorized.status_code == 401
+    assert authorized.status_code == 200
+    assert "Alarm Operations Console" in authorized.text
+    assert str(alarm_id) in authorized.text
+    assert "triggered" in authorized.text
 
 
 @pytest.mark.unit

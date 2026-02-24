@@ -21,6 +21,8 @@ It supports:
 - Persisting alarms in PostgreSQL (with audit logs)
 - An ACK (acknowledge) capability link (`/a/{ack_token}`)
 - A simple escalation schedule via Redis-backed jobs
+- Prometheus-style metrics (`/metrics`)
+- A read-only admin dashboard (`/admin?key=<ADMIN_API_KEY>`)
 
 ## Flow diagrams (Mermaid)
 
@@ -187,7 +189,7 @@ Main docs:
 - `docs/ARCHITECTURE.md`
 - `docs/DATA_MODEL.md`
 - `docs/INTEGRATIONS.md`
-- `docs/DEEP_CODE_INSPECTION_FINDINGS.md`
+- `docs/archive/DEEP_CODE_INSPECTION_FINDINGS.md`
 
 ## Requirements
 

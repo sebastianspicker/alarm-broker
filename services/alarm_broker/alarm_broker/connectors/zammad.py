@@ -58,7 +58,7 @@ class ZammadConnector(BaseConnector):
         Returns:
             True if API token is configured
         """
-        return bool(self._zammad_cfg.api_token)
+        return bool(self._zammad_cfg.api_token and self._zammad_cfg.base_url)
 
     def _headers(self) -> dict[str, str]:
         """Build headers for Zammad API requests.
@@ -81,9 +81,7 @@ class ZammadConnector(BaseConnector):
             RuntimeError: If response doesn't contain a valid ticket ID
             httpx.HTTPStatusError: If the API request fails
         """
-        url = f"{self._zammad_cfg.base_url}/api/v1/tickets"
-        resp = await self._http.post(url, headers=self._headers(), json=payload)
-        resp.raise_for_status()
+        resp = await self._post_with_retry("/api/v1/tickets", json=payload)
         data = resp.json()
         ticket_id = data.get("id")
         if not isinstance(ticket_id, int):
@@ -101,7 +99,6 @@ class ZammadConnector(BaseConnector):
         Raises:
             httpx.HTTPStatusError: If the API request fails
         """
-        url = f"{self._zammad_cfg.base_url}/api/v1/tickets/{ticket_id}"
         payload = {
             "article": {
                 "subject": subject,
@@ -110,8 +107,7 @@ class ZammadConnector(BaseConnector):
                 "internal": True,
             }
         }
-        resp = await self._http.put(url, headers=self._headers(), json=payload)
-        resp.raise_for_status()
+        await self._put_with_retry(f"/api/v1/tickets/{ticket_id}", json=payload)
 
 
 # Backward compatibility alias

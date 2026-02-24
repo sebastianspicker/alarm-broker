@@ -78,7 +78,19 @@
       cursor: pointer;
     }
     button:hover { background: var(--accent-hover); }
+    button[disabled] { opacity: 0.75; cursor: not-allowed; }
+    .hint { margin-top: 10px; color: var(--muted); font-size: 0.9rem; }
   </style>
+  <script>
+    function lockSubmit(formEl) {
+      var button = formEl.querySelector("button[type='submit']");
+      if (!button) return true;
+      if (button.disabled) return false;
+      button.disabled = true;
+      button.textContent = "Wird gesendet ...";
+      return true;
+    }
+  </script>
 </head>
 <body>
   <main class="card" role="main">

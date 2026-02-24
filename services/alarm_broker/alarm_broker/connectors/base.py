@@ -6,7 +6,6 @@ centralizing retry logic, HTTP client handling, and configuration patterns.
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,7 +28,7 @@ class BaseConnectorConfig:
     api_key: str = ""
 
 
-class BaseConnector(ABC):
+class BaseConnector:
     """Abstract base class for external service connectors.
 
     Provides common functionality:

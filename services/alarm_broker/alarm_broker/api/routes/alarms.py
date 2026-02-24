@@ -6,17 +6,30 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alarm_broker.api.deps import get_redis, get_session, require_admin
-from alarm_broker.api.schemas import AckIn, AlarmNoteIn, AlarmNoteOut, AlarmOut, TransitionIn
-from alarm_broker.db.models import Alarm, AlarmStatus
+from alarm_broker.api.schemas import (
+    AckIn,
+    AlarmNoteIn,
+    AlarmNoteOut,
+    AlarmOut,
+    BulkAckIn,
+    BulkOperationOut,
+    BulkTransitionIn,
+    TransitionIn,
+)
+from alarm_broker.db.models import Alarm, AlarmNote, AlarmStatus
 from alarm_broker.services.alarm_service import (
     acknowledge_alarm,
     get_alarm_or_404,
     transition_alarm,
+)
+from alarm_broker.services.event_service import (
+    enqueue_alarm_acked_event,
+    enqueue_alarm_state_changed_event,
 )
 
 router = APIRouter(prefix="/v1/alarms", dependencies=[Depends(require_admin)])
@@ -168,16 +181,12 @@ async def alarm_stats(
 
     # Count by status
     status_counts = (
-        await session.execute(
-            select(Alarm.status, func.count(Alarm.id)).group_by(Alarm.status)
-        )
+        await session.execute(select(Alarm.status, func.count(Alarm.id)).group_by(Alarm.status))
     ).all()
 
     # Count by severity
     severity_counts = (
-        await session.execute(
-            select(Alarm.severity, func.count(Alarm.id)).group_by(Alarm.severity)
-        )
+        await session.execute(select(Alarm.severity, func.count(Alarm.id)).group_by(Alarm.severity))
     ).all()
 
     # Total count
@@ -188,6 +197,160 @@ async def alarm_stats(
         "by_status": {str(s): c for s, c in status_counts},
         "by_severity": {s: c for s, c in severity_counts},
     }
+
+
+@router.post("/bulk/ack", response_model=BulkOperationOut)
+async def bulk_ack_alarms(
+    request: Request,
+    body: BulkAckIn,
+    session: AsyncSession = Depends(get_session),
+) -> BulkOperationOut:
+    alarms = (await session.scalars(select(Alarm).where(Alarm.id.in_(body.alarm_ids)))).all()
+    by_id = {alarm.id: alarm for alarm in alarms}
+
+    changed = 0
+    unchanged = 0
+    missing: list[uuid.UUID] = []
+    redis = get_redis(request)
+
+    for alarm_id in body.alarm_ids:
+        alarm = by_id.get(alarm_id)
+        if alarm is None:
+            missing.append(alarm_id)
+            continue
+
+        was_changed = await acknowledge_alarm(
+            session,
+            alarm,
+            acked_by=body.acked_by,
+            note=body.note,
+        )
+        if was_changed:
+            changed += 1
+            await enqueue_alarm_acked_event(
+                redis,
+                alarm_id=alarm.id,
+                acked_by=body.acked_by,
+                note=body.note,
+                logger=logger,
+            )
+            await enqueue_alarm_state_changed_event(
+                redis,
+                alarm_id=alarm.id,
+                state=alarm.status.value,
+                logger=logger,
+            )
+        else:
+            unchanged += 1
+
+    return BulkOperationOut(
+        requested=len(body.alarm_ids),
+        changed=changed,
+        unchanged=unchanged,
+        missing=missing,
+    )
+
+
+@router.post("/bulk/resolve", response_model=BulkOperationOut)
+async def bulk_resolve_alarms(
+    request: Request,
+    body: BulkTransitionIn,
+    session: AsyncSession = Depends(get_session),
+) -> BulkOperationOut:
+    alarms = (await session.scalars(select(Alarm).where(Alarm.id.in_(body.alarm_ids)))).all()
+    by_id = {alarm.id: alarm for alarm in alarms}
+
+    changed = 0
+    unchanged = 0
+    missing: list[uuid.UUID] = []
+    redis = get_redis(request)
+
+    for alarm_id in body.alarm_ids:
+        alarm = by_id.get(alarm_id)
+        if alarm is None:
+            missing.append(alarm_id)
+            continue
+        try:
+            was_changed = await transition_alarm(
+                session,
+                alarm,
+                target_status=AlarmStatus.RESOLVED,
+                actor=body.actor,
+                note=body.note,
+            )
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_409_CONFLICT:
+                unchanged += 1
+                continue
+            raise
+        if was_changed:
+            changed += 1
+            await enqueue_alarm_state_changed_event(
+                redis,
+                alarm_id=alarm.id,
+                state=alarm.status.value,
+                logger=logger,
+            )
+        else:
+            unchanged += 1
+
+    return BulkOperationOut(
+        requested=len(body.alarm_ids),
+        changed=changed,
+        unchanged=unchanged,
+        missing=missing,
+    )
+
+
+@router.post("/bulk/cancel", response_model=BulkOperationOut)
+async def bulk_cancel_alarms(
+    request: Request,
+    body: BulkTransitionIn,
+    session: AsyncSession = Depends(get_session),
+) -> BulkOperationOut:
+    alarms = (await session.scalars(select(Alarm).where(Alarm.id.in_(body.alarm_ids)))).all()
+    by_id = {alarm.id: alarm for alarm in alarms}
+
+    changed = 0
+    unchanged = 0
+    missing: list[uuid.UUID] = []
+    redis = get_redis(request)
+
+    for alarm_id in body.alarm_ids:
+        alarm = by_id.get(alarm_id)
+        if alarm is None:
+            missing.append(alarm_id)
+            continue
+        try:
+            was_changed = await transition_alarm(
+                session,
+                alarm,
+                target_status=AlarmStatus.CANCELLED,
+                actor=body.actor,
+                note=body.note,
+            )
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_409_CONFLICT:
+                unchanged += 1
+                continue
+            raise
+        if was_changed:
+            changed += 1
+            await enqueue_alarm_state_changed_event(
+                redis,
+                alarm_id=alarm.id,
+                state=alarm.status.value,
+                logger=logger,
+            )
+        else:
+            unchanged += 1
+
+    return BulkOperationOut(
+        requested=len(body.alarm_ids),
+        changed=changed,
+        unchanged=unchanged,
+        missing=missing,
+    )
 
 
 @router.get("/{alarm_id}", response_model=AlarmOut)
@@ -213,11 +376,20 @@ async def ack_alarm_api(
 
     request.state.alarm_id = str(alarm.id)
     if changed:
-        try:
-            redis = get_redis(request)
-            await redis.enqueue_job("alarm_acked", str(alarm.id), body.acked_by, body.note)
-        except Exception:
-            logger.exception("enqueue alarm_acked failed", extra={"alarm_id": str(alarm.id)})
+        redis = get_redis(request)
+        await enqueue_alarm_acked_event(
+            redis,
+            alarm_id=alarm.id,
+            acked_by=body.acked_by,
+            note=body.note,
+            logger=logger,
+        )
+        await enqueue_alarm_state_changed_event(
+            redis,
+            alarm_id=alarm.id,
+            state=alarm.status.value,
+            logger=logger,
+        )
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -230,7 +402,7 @@ async def resolve_alarm_api(
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     alarm = await get_alarm_or_404(session, alarm_id)
-    await transition_alarm(
+    changed = await transition_alarm(
         session,
         alarm,
         target_status=AlarmStatus.RESOLVED,
@@ -238,6 +410,14 @@ async def resolve_alarm_api(
         note=body.note,
     )
     request.state.alarm_id = str(alarm.id)
+    if changed:
+        redis = get_redis(request)
+        await enqueue_alarm_state_changed_event(
+            redis,
+            alarm_id=alarm.id,
+            state=alarm.status.value,
+            logger=logger,
+        )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -249,7 +429,7 @@ async def cancel_alarm_api(
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     alarm = await get_alarm_or_404(session, alarm_id)
-    await transition_alarm(
+    changed = await transition_alarm(
         session,
         alarm,
         target_status=AlarmStatus.CANCELLED,
@@ -257,6 +437,14 @@ async def cancel_alarm_api(
         note=body.note,
     )
     request.state.alarm_id = str(alarm.id)
+    if changed:
+        redis = get_redis(request)
+        await enqueue_alarm_state_changed_event(
+            redis,
+            alarm_id=alarm.id,
+            state=alarm.status.value,
+            logger=logger,
+        )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -275,8 +463,6 @@ async def list_alarm_notes(
     Returns:
         List of alarm notes ordered by creation time
     """
-    from alarm_broker.db.models import AlarmNote
-
     # Verify alarm exists
     await get_alarm_or_404(session, alarm_id)
 
@@ -307,8 +493,6 @@ async def create_alarm_note(
     Returns:
         Created note
     """
-    from alarm_broker.db.models import AlarmNote
-
     # Verify alarm exists
     await get_alarm_or_404(session, alarm_id)
 
