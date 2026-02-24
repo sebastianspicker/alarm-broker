@@ -23,6 +23,7 @@ from alarm_broker.core.errors import (
     RateLimitError,
     ValidationError,
 )
+from alarm_broker.core.metrics import record_http_request
 from alarm_broker.db.engine import create_async_engine_from_url
 from alarm_broker.db.session import create_sessionmaker
 from alarm_broker.settings import Settings, get_settings
@@ -89,6 +90,12 @@ def _install_observability_middleware(app: FastAPI) -> None:
                     "alarm_id": getattr(request.state, "alarm_id", None),
                 },
             )
+            record_http_request(
+                method=request.method,
+                route=request.url.path,
+                status_code=500,
+                duration_ms=duration_ms,
+            )
             raise
 
         duration_ms = int((time.perf_counter() - start) * 1000)
@@ -103,6 +110,12 @@ def _install_observability_middleware(app: FastAPI) -> None:
                 "latency_ms": duration_ms,
                 "alarm_id": getattr(request.state, "alarm_id", None),
             },
+        )
+        record_http_request(
+            method=request.method,
+            route=request.url.path,
+            status_code=response.status_code,
+            duration_ms=duration_ms,
         )
 
         return response

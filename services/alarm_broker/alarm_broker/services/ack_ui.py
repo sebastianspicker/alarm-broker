@@ -26,7 +26,7 @@ def render_ack_page(alarm: Alarm, enriched: dict[str, Any]) -> str:
 
     form_block = (
         """
-    <form method=\"post\"> 
+    <form method=\"post\" onsubmit=\"return lockSubmit(this)\">
       <label for=\"acked_by\">Dein Name (optional)
         <input id=\"acked_by\" name=\"acked_by\" autocomplete=\"name\">
       </label>
@@ -34,6 +34,7 @@ def render_ack_page(alarm: Alarm, enriched: dict[str, Any]) -> str:
         <textarea id=\"note\" name=\"note\" rows=\"4\"></textarea>
       </label>
       <button type=\"submit\">Alarm übernehmen</button>
+      <p class=\"hint\">Die Seite aktualisiert nach dem Absenden automatisch.</p>
     </form>
 """
         if is_triggered

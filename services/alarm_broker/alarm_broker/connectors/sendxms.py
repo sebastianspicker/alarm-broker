@@ -61,12 +61,12 @@ class SendXmsConnector(BaseConnector):
         if not self._sms_cfg.enabled:
             return
 
-        url = f"{self._sms_cfg.base_url}{self._sms_cfg.send_path}"
-        headers = {"Authorization": f"Bearer {self._sms_cfg.api_key}"}
         payload = {"to": to, "message": message, "from": self._sms_cfg.from_name}
-
-        resp = await self._http.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
+        await self._post_with_retry(
+            self._sms_cfg.send_path,
+            json=payload,
+            headers={"Authorization": f"Bearer {self._sms_cfg.api_key}"},
+        )
 
 
 # Backward compatibility alias

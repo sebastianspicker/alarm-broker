@@ -161,6 +161,20 @@ class SignalSettings(BaseSettings):
         return self.signal_enabled and bool(self.signal_target_group_id)
 
 
+class WebhookSettings(BaseSettings):
+    """Webhook callback settings."""
+
+    model_config = SettingsConfigDict(env_prefix="", env_file=".env", extra="ignore")
+
+    webhook_enabled: bool = False
+    webhook_url: AnyHttpUrl | None = None
+    webhook_secret: str = ""
+    webhook_timeout_seconds: int = Field(default=5, ge=1, le=60)
+
+    def is_enabled(self) -> bool:
+        return self.webhook_enabled and self.webhook_url is not None
+
+
 class EscalationSettings(BaseSettings):
     """Escalation timing settings.
 
@@ -241,6 +255,12 @@ class Settings(BaseSettings):
     signal_target_group_id: str = ""
     signal_send_path: str = "/v2/send"
 
+    # Webhook callbacks
+    webhook_enabled: bool = False
+    webhook_url: AnyHttpUrl | None = None
+    webhook_secret: str = ""
+    webhook_timeout_seconds: int = Field(default=5, ge=1, le=60)
+
     # Escalation timings
     escalate_t1: int = Field(default=60, ge=0)
     escalate_t2: int = Field(default=180, ge=0)
@@ -305,6 +325,16 @@ class Settings(BaseSettings):
             signal_cli_endpoint=self.signal_cli_endpoint,
             signal_target_group_id=self.signal_target_group_id,
             signal_send_path=self.signal_send_path,
+        )
+
+    @property
+    def webhook(self) -> WebhookSettings:
+        """Get webhook settings as a group."""
+        return WebhookSettings(
+            webhook_enabled=self.webhook_enabled,
+            webhook_url=self.webhook_url,
+            webhook_secret=self.webhook_secret,
+            webhook_timeout_seconds=self.webhook_timeout_seconds,
         )
 
     @property

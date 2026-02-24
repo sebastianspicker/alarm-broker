@@ -18,7 +18,6 @@ from alarm_broker.connectors.sendxms import SendXmsClient
 from alarm_broker.connectors.signal import SignalClient
 from alarm_broker.connectors.zammad import ZammadClient
 from alarm_broker.db.models import Alarm, AlarmNotification, EscalationStep
-from alarm_broker.services.enrichment_service import enrich_alarm_context
 from alarm_broker.worker.message import format_alarm_message
 
 logger = logging.getLogger("alarm_broker")
@@ -158,6 +157,7 @@ class NotificationService:
     async def add_zammad_ack_note(
         self,
         session: AsyncSession,
+        alarm_id: uuid.UUID,
         ticket_id: int,
         acked_by: str | None,
         acked_at: Any,
@@ -167,6 +167,7 @@ class NotificationService:
 
         Args:
             session: Database session
+            alarm_id: Alarm ID for audit logging
             ticket_id: Zammad ticket ID
             acked_by: Person who acknowledged
             acked_at: Timestamp of acknowledgment
@@ -191,7 +192,7 @@ class NotificationService:
             await self._zammad.add_internal_note(ticket_id, subject=subject, body=body)
             await log_notification(
                 session,
-                alarm_id=uuid.UUID("00000000-0000-0000-0000-000000000000"),  # Placeholder
+                alarm_id=alarm_id,
                 channel="zammad",
                 target_id=None,
                 payload={"action": "ack_update", "ticket_id": ticket_id},

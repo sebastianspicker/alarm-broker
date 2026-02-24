@@ -13,11 +13,13 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from alarm_broker.api.deps import get_app_settings, get_redis, get_sessionmaker
+from alarm_broker.core.metrics import render_prometheus_metrics
 from alarm_broker.settings import Settings
 
 router = APIRouter()
@@ -130,15 +132,20 @@ async def healthz_details(
     }
 
     # Determine overall status
-    all_healthy = (
-        db_status["status"] == "ok"
-        and redis_status["status"] == "ok"
-    )
+    all_healthy = db_status["status"] == "ok" and redis_status["status"] == "ok"
 
     status_code = status.HTTP_200_OK if all_healthy else status.HTTP_503_SERVICE_UNAVAILABLE
     details["status"] = "healthy" if all_healthy else "unhealthy"
 
     return JSONResponse(status_code=status_code, content=details)
+
+
+@router.get("/metrics")
+async def metrics(
+    sessionmaker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
+) -> PlainTextResponse:
+    content = await render_prometheus_metrics(sessionmaker)
+    return PlainTextResponse(content=content, media_type="text/plain")
 
 
 async def _check_database(sessionmaker: async_sessionmaker[AsyncSession]) -> dict[str, Any]:
@@ -164,8 +171,8 @@ async def _check_database(sessionmaker: async_sessionmaker[AsyncSession]) -> dic
                 row = result.fetchone()
                 if row:
                     migration_version = row[0]
-            except Exception:
-                pass  # Table might not exist yet
+            except SQLAlchemyError:
+                migration_version = None
 
             return {
                 "status": "ok",

@@ -12,6 +12,10 @@ from alarm_broker.api.schemas import AckIn
 from alarm_broker.services.ack_ui import render_ack_page
 from alarm_broker.services.alarm_service import acknowledge_alarm, get_alarm_by_ack_token
 from alarm_broker.services.enrichment_service import enrich_alarm_context
+from alarm_broker.services.event_service import (
+    enqueue_alarm_acked_event,
+    enqueue_alarm_state_changed_event,
+)
 
 router = APIRouter()
 logger = logging.getLogger("alarm_broker")
@@ -59,11 +63,20 @@ async def ack_submit(
     )
     if changed:
         request.state.alarm_id = str(alarm.id)
-        try:
-            redis = get_redis(request)
-            await redis.enqueue_job("alarm_acked", str(alarm.id), payload.acked_by, payload.note)
-        except Exception:
-            logger.exception("enqueue alarm_acked failed", extra={"alarm_id": str(alarm.id)})
+        redis = get_redis(request)
+        await enqueue_alarm_acked_event(
+            redis,
+            alarm_id=alarm.id,
+            acked_by=payload.acked_by,
+            note=payload.note,
+            logger=logger,
+        )
+        await enqueue_alarm_state_changed_event(
+            redis,
+            alarm_id=alarm.id,
+            state=alarm.status.value,
+            logger=logger,
+        )
 
     enriched = await enrich_alarm_context(session, alarm)
     return HTMLResponse(render_ack_page(alarm, enriched))

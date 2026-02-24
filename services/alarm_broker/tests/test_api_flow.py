@@ -32,7 +32,10 @@ async def test_yealink_idempotent_and_ack(
             alarm_id_2 = uuid.UUID(r2.json()["alarm_id"])
 
             assert alarm_id_1 == alarm_id_2
-            assert [name for name, _args in fake_redis.jobs] == ["alarm_created"]
+            assert [name for name, _args in fake_redis.jobs] == [
+                "alarm_created",
+                "alarm_state_changed",
+            ]
 
     async with sessionmaker() as session:
         alarms = (await session.scalars(select(Alarm))).all()
@@ -58,7 +61,12 @@ async def test_yealink_idempotent_and_ack(
         assert alarm2
         assert alarm2.status == AlarmStatus.ACKNOWLEDGED
 
-    assert [name for name, _args in fake_redis.jobs] == ["alarm_created", "alarm_acked"]
+    assert [name for name, _args in fake_redis.jobs] == [
+        "alarm_created",
+        "alarm_state_changed",
+        "alarm_acked",
+        "alarm_state_changed",
+    ]
 
 
 @pytest.mark.asyncio

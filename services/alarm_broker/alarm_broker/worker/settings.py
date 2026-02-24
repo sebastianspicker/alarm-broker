@@ -9,7 +9,7 @@ from alarm_broker.connectors.zammad import ZammadClient, ZammadConfig
 from alarm_broker.db.engine import create_async_engine_from_url
 from alarm_broker.db.session import create_sessionmaker
 from alarm_broker.settings import get_settings
-from alarm_broker.worker.tasks import alarm_acked, alarm_created, escalate
+from alarm_broker.worker.tasks import alarm_acked, alarm_created, alarm_state_changed, escalate
 
 
 async def startup(ctx: dict) -> None:
@@ -68,4 +68,4 @@ class WorkerSettings:
     redis_settings = RedisSettings.from_dsn(str(get_settings().redis_url))
     on_startup = startup
     on_shutdown = shutdown
-    functions = [alarm_created, escalate, alarm_acked]
+    functions = [alarm_created, escalate, alarm_acked, alarm_state_changed]

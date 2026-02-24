@@ -18,5 +18,4 @@ This repository implements a PoC alarm broker that receives silent alarms and fa
 ## Quick Links
 
 - [Main README](../README.md) - Project overview and quickstart
-- [Improvement Plan](../plans/improvement-plan.md) - Roadmap for enhancements
 - [Security Findings Archive](archive/DEEP_CODE_INSPECTION_FINDINGS.md) - Historical security fixes

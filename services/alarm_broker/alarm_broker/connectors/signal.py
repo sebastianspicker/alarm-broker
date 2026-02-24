@@ -66,11 +66,8 @@ class SignalConnector(BaseConnector):
             return
 
         gid = group_id or self._signal_cfg.target_group_id
-        url = f"{self._signal_cfg.endpoint}{self._signal_cfg.send_path}"
         payload = {"message": message, "groupId": gid}
-
-        resp = await self._http.post(url, json=payload)
-        resp.raise_for_status()
+        await self._post_with_retry(self._signal_cfg.send_path, json=payload)
 
 
 # Backward compatibility alias

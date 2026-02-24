@@ -10,7 +10,6 @@ import logging
 import secrets
 import uuid
 from datetime import UTC, datetime
-from typing import Any
 
 from arq.connections import ArqRedis
 from sqlalchemy import select
@@ -19,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from alarm_broker.core.idempotency import bucket_10s, idempotency_key
 from alarm_broker.core.rate_limit import minute_bucket, rate_limit_key
 from alarm_broker.db.models import Alarm, AlarmStatus, Device, Room
+from alarm_broker.services.event_service import enqueue_alarm_state_changed_event
 from alarm_broker.settings import Settings
 
 logger = logging.getLogger("alarm_broker")
@@ -54,12 +54,14 @@ class TriggerResult:
         self.error_message = error_message
 
     @classmethod
-    def ok(cls, alarm_id: uuid.UUID, status: AlarmStatus, is_duplicate: bool = False) -> "TriggerResult":
+    def ok(
+        cls, alarm_id: uuid.UUID, status: AlarmStatus, is_duplicate: bool = False
+    ) -> TriggerResult:
         """Create a successful result."""
         return cls(success=True, alarm_id=alarm_id, status=status, is_duplicate=is_duplicate)
 
     @classmethod
-    def error(cls, code: int, message: str) -> "TriggerResult":
+    def error(cls, code: int, message: str) -> TriggerResult:
         """Create an error result."""
         return cls(success=False, error_code=code, error_message=message)
 
@@ -94,8 +96,12 @@ class TriggerService:
         self._session = session
         self._redis = redis
         self._settings = settings
-        self._idempotency_bucket = idempotency_bucket if idempotency_bucket is not None else bucket_10s()
-        self._rate_limit_bucket = rate_limit_bucket if rate_limit_bucket is not None else minute_bucket()
+        self._idempotency_bucket = (
+            idempotency_bucket if idempotency_bucket is not None else bucket_10s()
+        )
+        self._rate_limit_bucket = (
+            rate_limit_bucket if rate_limit_bucket is not None else minute_bucket()
+        )
 
     def _get_idempotency_key(self, token: str) -> str:
         """Get the Redis key for idempotency checking.
@@ -194,9 +200,7 @@ class TriggerService:
         Returns:
             Tuple of (device, error_message)
         """
-        device = await self._session.scalar(
-            select(Device).where(Device.device_token == token)
-        )
+        device = await self._session.scalar(select(Device).where(Device.device_token == token))
         if not device:
             return None, "Unknown token"
         if not device.person_id or not device.room_id:
@@ -351,6 +355,12 @@ class TriggerService:
 
         # Enqueue notification task
         await self.enqueue_alarm_created(alarm.id)
+        await enqueue_alarm_state_changed_event(
+            self._redis,
+            alarm_id=alarm.id,
+            state=alarm.status.value,
+            logger=logger,
+        )
 
         logger.info(
             "alarm_triggered",

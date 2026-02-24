@@ -107,8 +107,10 @@ alarm-broker/
 |----------|--------|-------------|
 | `/healthz` | GET | Basic liveness check |
 | `/readyz` | GET | Readiness check (DB + Redis) |
+| `/metrics` | GET | Prometheus-style runtime and domain metrics |
 | `/v1/yealink/alarm` | GET | Yealink alarm trigger |
 | `/a/{ack_token}` | GET/POST | Alarm acknowledgment UI |
+| `/admin` | GET | Read-only alarm dashboard (`?key=...`) |
 
 ### Admin Endpoints (require `X-Admin-Key` header)
 
@@ -119,6 +121,9 @@ alarm-broker/
 | `/v1/alarms/{id}/ack` | POST | Acknowledge alarm |
 | `/v1/alarms/{id}/resolve` | POST | Resolve alarm |
 | `/v1/alarms/{id}/cancel` | POST | Cancel alarm |
+| `/v1/alarms/bulk/ack` | POST | Bulk acknowledge alarms |
+| `/v1/alarms/bulk/resolve` | POST | Bulk resolve alarms |
+| `/v1/alarms/bulk/cancel` | POST | Bulk cancel alarms |
 | `/v1/admin/seed` | POST | Load seed data |
 | `/v1/admin/devices` | POST/PUT | Upsert device |
 | `/v1/admin/escalation-policy` | POST | Configure escalation |
@@ -149,6 +154,12 @@ All configuration is via environment variables. See `.env.example` for available
 ### Integration Settings
 
 See `.env.example` for Zammad, SMS, and Signal configuration options.
+
+Webhook options (state change callbacks):
+- `WEBHOOK_ENABLED`
+- `WEBHOOK_URL`
+- `WEBHOOK_SECRET`
+- `WEBHOOK_TIMEOUT_SECONDS`
 
 ## Database Migrations
 
