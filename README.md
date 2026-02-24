@@ -33,33 +33,34 @@ The diagrams below reflect the flow as implemented in this repository.
 ```mermaid
 flowchart LR
   %% External trigger/source
-  Y["Yealink phone<br/>(Emergency key)"] -->|HTTP GET /v1/yealink/alarm?token=...| API["Alarm Broker API<br/>(FastAPI)"]
+  Y["Yealink phone<br/>(Emergency key)"] -->|"HTTP GET /v1/yealink/alarm?token=..."| API["Alarm Broker API<br/>(FastAPI)"]
 
   %% Core state & job infrastructure
-  API -->|INSERT/UPDATE| PG["PostgreSQL<br/>(alarms, mapping, audit)"]
-  API -->|SET idemp:* (NX, EX)<br/>INCR rl:*| R["Redis<br/>(idempotency, rate limit, jobs)"]
-  API -->|enqueue_job('alarm_created')| R
+  API -->|"INSERT/UPDATE"| PG["PostgreSQL<br/>(alarms, mapping, audit)"]
+  API -->|"SET idempotency key (NX, EX)"| R["Redis<br/>(idempotency, rate limit, jobs)"]
+  API -->|"INCR rate-limit key"| R
+  API -->|"enqueue_job('alarm_created')"| R
 
   %% Worker fan-out & escalation
-  R -->|arq jobs| W["Alarm Worker<br/>(arq)"]
-  W -->|SELECT alarm + enrichment| PG
-  W -->|INSERT audit rows| PG
-  W -->|enqueue_job('escalate', _defer_by=...)| R
+  R -->|"arq jobs"| W["Alarm Worker<br/>(arq)"]
+  W -->|"SELECT alarm + enrichment"| PG
+  W -->|"INSERT audit rows"| PG
+  W -->|"enqueue_job('escalate', _defer_by=...)"| R
 
   %% Downstream connectors (best effort)
-  W -->|create ticket / add note| Z["Zammad API"]
-  W -->|send message| SMS["SMS provider<br/>(generic HTTP connector)"]
-  W -->|send message| SIG["Signal endpoint<br/>(signal-cli-rest-api)"]
+  W -->|"create ticket / add note"| Z["Zammad API"]
+  W -->|"send message"| SMS["SMS provider<br/>(generic HTTP connector)"]
+  W -->|"send message"| SIG["Signal endpoint<br/>(signal-cli-rest-api)"]
 
   %% Responder acknowledgement flow
-  RESP["Responder<br/>(web browser)"] -->|GET/POST /a/{ack_token}| API
-  API -->|enqueue_job('alarm_acked')| R
-  W -->|Zammad internal note (ACK)| Z
+  RESP["Responder<br/>(web browser)"] -->|"GET/POST /a/{ack_token}"| API
+  API -->|"enqueue_job('alarm_acked')"| R
+  W -->|"Zammad internal note (ACK)"| Z
 
   %% Admin flow (seeding/mapping)
-  ADMIN["Admin (operator)"] -->|X-Admin-Key<br/>/v1/admin/seed| API
-  ADMIN -->|X-Admin-Key<br/>/v1/admin/devices| API
-  ADMIN -->|X-Admin-Key<br/>/v1/admin/escalation-policy| API
+  ADMIN["Admin (operator)"] -->|"X-Admin-Key /v1/admin/seed"| API
+  ADMIN -->|"X-Admin-Key /v1/admin/devices"| API
+  ADMIN -->|"X-Admin-Key /v1/admin/escalation-policy"| API
 ```
 
 ### 2) Trigger flow (Yealink → API → DB → worker)
