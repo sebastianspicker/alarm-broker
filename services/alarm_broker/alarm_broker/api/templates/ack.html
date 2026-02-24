@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${title}</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --surface: #ffffff;
+      --text: #1f2937;
+      --muted: #4b5563;
+      --ok: #047857;
+      --warn: #b45309;
+      --border: #dbe3ef;
+      --accent: #0f766e;
+      --accent-hover: #115e59;
+      --radius: 14px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Avenir Next", "Segoe UI", system-ui, sans-serif;
+      color: var(--text);
+      background: radial-gradient(circle at 20% 20%, #e7f6ff 0, #f4f7fb 42%, #eef2f9 100%);
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+    }
+    .card {
+      width: min(720px, 100%);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: 0 12px 36px rgba(15, 23, 42, 0.08);
+      padding: 24px;
+    }
+    h1 { margin-top: 0; margin-bottom: 8px; font-size: 1.6rem; }
+    .meta { color: var(--muted); line-height: 1.45; margin-bottom: 18px; }
+    .status {
+      margin: 0 0 14px;
+      font-weight: 700;
+      color: ${status_color};
+      letter-spacing: 0.02em;
+    }
+    .info {
+      margin: 0 0 18px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: #f8fafc;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    label { display: block; font-weight: 600; margin-bottom: 8px; }
+    input, textarea {
+      width: 100%;
+      border: 1px solid #cdd8e8;
+      border-radius: 10px;
+      padding: 10px 12px;
+      font: inherit;
+      background: #fff;
+      margin-top: 8px;
+    }
+    input:focus, textarea:focus {
+      outline: 2px solid #bae6fd;
+      border-color: #38bdf8;
+    }
+    button {
+      margin-top: 14px;
+      border: 0;
+      border-radius: 10px;
+      padding: 11px 16px;
+      background: var(--accent);
+      color: #fff;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button:hover { background: var(--accent-hover); }
+  </style>
+</head>
+<body>
+  <main class="card" role="main">
+    <h1>${headline}</h1>
+    <p class="status">Status: ${status_label}</p>
+    <p class="meta"><strong>Person:</strong> ${person}<br><strong>Ort:</strong> ${room}<br><strong>Zeit:</strong> ${created}</p>
+    <p class="info">${info_message}</p>
+    ${form_block}
+  </main>
+</body>
+</html>
