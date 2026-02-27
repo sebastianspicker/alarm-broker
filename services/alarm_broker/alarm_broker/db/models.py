@@ -110,7 +110,11 @@ class Alarm(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     status: Mapped[AlarmStatus] = mapped_column(
-        Enum(AlarmStatus, name="alarm_status"),
+        Enum(
+            AlarmStatus,
+            name="alarm_status",
+            values_callable=lambda x: [e.value for e in x],
+        ),
         nullable=False,
         default=AlarmStatus.TRIGGERED,
         server_default=AlarmStatus.TRIGGERED.value,
@@ -139,6 +143,8 @@ class Alarm(Base):
     resolved_by: Mapped[str | None] = mapped_column(String, nullable=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cancelled_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_by: Mapped[str | None] = mapped_column(String, nullable=True)
     meta: Mapped[dict[str, Any]] = mapped_column(
         MutableDict.as_mutable(JSON), nullable=False, default=dict
     )

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
+from alarm_broker.constants import PRIORITY_ALL
 from alarm_broker.db.models import AlarmStatus
 
 
@@ -117,3 +119,42 @@ class BulkOperationOut(BaseModel):
     changed: int
     unchanged: int
     missing: list[uuid.UUID] = Field(default_factory=list)
+
+
+class ExportFormat(StrEnum):
+    """Supported export formats."""
+
+    JSON = "json"
+    CSV = "csv"
+
+
+class AlarmExportIn(BaseModel):
+    """Filter options for alarm export."""
+
+    status: AlarmStatus | None = None
+    severity: str | None = None
+    person_id: str | None = None
+    room_id: str | None = None
+    site_id: str | None = None
+    device_id: str | None = None
+    source: str | None = None
+    created_after: datetime | None = None
+    created_before: datetime | None = None
+    format: ExportFormat = ExportFormat.JSON
+    limit: int = Field(default=1000, ge=1, le=10000)
+
+
+class AlarmPatchSchema(BaseModel):
+    """Schema für teilweises Update eines Alarms."""
+
+    title: str | None = None
+    description: str | None = None
+    severity: str | None = None
+    tags: list[str] | None = None
+
+    @model_validator(mode="after")
+    def validate_fields(self):
+        # Validiere Severity wenn angegeben
+        if self.severity and self.severity not in PRIORITY_ALL:
+            raise ValueError(f"Invalid severity. Must be one of: {PRIORITY_ALL}")
+        return self

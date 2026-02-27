@@ -12,7 +12,11 @@ import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from alarm_broker import constants
 from alarm_broker.connectors.zammad import ZammadClient
 from alarm_broker.core.metrics import record_event
 from alarm_broker.db.models import Alarm, AlarmStatus
@@ -20,6 +24,46 @@ from alarm_broker.services.enrichment_service import enrich_alarm_context
 from alarm_broker.services.notification_service import NotificationService, log_notification
 
 logger = logging.getLogger("alarm_broker")
+
+
+async def process_alarm_event(ctx: dict, payload: dict[str, Any]) -> None:
+    """Process a generic alarm event from EventPublisher.
+
+    This is a unified entry point for all alarm events. It dispatches
+    to the appropriate existing tasks based on the event type.
+
+    Args:
+        ctx: Worker context dictionary
+        payload: Event payload containing event_type and event data
+    """
+    event_type = payload.get("event_type")
+    alarm_id = payload.get("alarm_id")
+
+    if not event_type or not alarm_id:
+        logger.warning("process_alarm_event_invalid_payload", extra={"payload": payload})
+        return
+
+    # Dispatch to appropriate handler based on event type
+    if event_type == constants.EVENT_ALARM_CREATED:
+        await alarm_created(ctx, str(alarm_id))
+    elif event_type == constants.EVENT_ALARM_ACKNOWLEDGED:
+        acked_by = payload.get("acknowledged_by")
+        note = payload.get("note")
+        await alarm_acked(ctx, str(alarm_id), acked_by, note)
+    elif event_type == constants.EVENT_ALARM_STATE_CHANGED:
+        state = payload.get("new_state")
+        await alarm_state_changed(ctx, str(alarm_id), state)
+    elif event_type == constants.EVENT_ALARM_RESOLVED:
+        # For resolved events, we could add additional handling
+        logger.info("alarm_resolved_event_received", extra={"alarm_id": str(alarm_id)})
+    elif event_type == constants.EVENT_ALARM_CANCELLED:
+        # For cancelled events, we could add additional handling
+        logger.info("alarm_cancelled_event_received", extra={"alarm_id": str(alarm_id)})
+    else:
+        logger.warning(
+            "process_alarm_event_unknown_type",
+            extra={"event_type": event_type, "alarm_id": str(alarm_id)},
+        )
 
 
 def _get_notification_service(ctx: dict) -> NotificationService:
@@ -222,65 +266,112 @@ async def alarm_state_changed(ctx: dict, alarm_id: str, state: str) -> None:
             )
             return
 
-        payload = {
-            "event": "alarm.state_changed",
-            "alarm_id": str(alarm.id),
-            "state": state,
-            "created_at": alarm.created_at.isoformat() if alarm.created_at else None,
-            "acked_at": alarm.acked_at.isoformat() if alarm.acked_at else None,
-            "resolved_at": alarm.resolved_at.isoformat() if alarm.resolved_at else None,
-            "cancelled_at": alarm.cancelled_at.isoformat() if alarm.cancelled_at else None,
-            "person_id": alarm.person_id,
-            "room_id": alarm.room_id,
-            "site_id": alarm.site_id,
-            "device_id": alarm.device_id,
-        }
-
+        payload = _build_webhook_payload(alarm, state)
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if settings.webhook_secret:
             headers["X-Webhook-Secret"] = settings.webhook_secret
 
-        attempts = 3
-        for attempt in range(1, attempts + 1):
-            try:
-                response = await http.post(
-                    str(webhook_url),
-                    json=payload,
-                    headers=headers,
-                    timeout=float(settings.webhook_timeout_seconds),
+        await _send_webhook_with_retry(
+            http=http,
+            webhook_url=webhook_url,
+            payload=payload,
+            headers=headers,
+            timeout=settings.webhook_timeout_seconds,
+            alarm_id=alarm.id,
+            session=session,
+            state=state,
+        )
+
+
+def _build_webhook_payload(alarm: Alarm, state: str) -> dict[str, Any]:
+    """Build the webhook payload from an alarm.
+
+    Args:
+        alarm: Alarm instance
+        state: New alarm state value
+
+    Returns:
+        Dictionary payload for webhook
+    """
+    return {
+        "event": constants.EVENT_ALARM_STATE_CHANGED,
+        "alarm_id": str(alarm.id),
+        "state": state,
+        "created_at": alarm.created_at.isoformat() if alarm.created_at else None,
+        "acked_at": alarm.acked_at.isoformat() if alarm.acked_at else None,
+        "resolved_at": alarm.resolved_at.isoformat() if alarm.resolved_at else None,
+        "cancelled_at": alarm.cancelled_at.isoformat() if alarm.cancelled_at else None,
+        "person_id": alarm.person_id,
+        "room_id": alarm.room_id,
+        "site_id": alarm.site_id,
+        "device_id": alarm.device_id,
+    }
+
+
+async def _send_webhook_with_retry(
+    http: Any,
+    webhook_url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    timeout: float,
+    alarm_id: uuid.UUID,
+    session: AsyncSession,
+    state: str,
+    max_attempts: int = 3,
+) -> None:
+    """Send webhook with exponential backoff retry.
+
+    Args:
+        http: HTTP client
+        webhook_url: URL to send webhook to
+        payload: JSON payload
+        headers: HTTP headers
+        timeout: Request timeout in seconds
+        alarm_id: Alarm ID for logging
+        session: Database session
+        state: State for logging
+        max_attempts: Maximum retry attempts
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = await http.post(
+                webhook_url,
+                json=payload,
+                headers=headers,
+                timeout=float(timeout),
+            )
+            response.raise_for_status()
+            await log_notification(
+                session,
+                alarm_id=alarm_id,
+                channel="webhook",
+                target_id=None,
+                payload={"state": state, "attempt": attempt},
+                result="ok",
+            )
+            record_event("webhook_delivery_ok")
+            return
+        except Exception as exc:
+            is_last = attempt == max_attempts
+            if is_last:
+                logger.exception(
+                    "webhook_delivery_failed",
+                    extra={
+                        "alarm_id": str(alarm_id),
+                        "state": state,
+                        "attempts": max_attempts,
+                        "error": str(exc),
+                    },
                 )
-                response.raise_for_status()
                 await log_notification(
                     session,
-                    alarm_id=alarm.id,
+                    alarm_id=alarm_id,
                     channel="webhook",
                     target_id=None,
-                    payload={"state": state, "attempt": attempt},
-                    result="ok",
+                    payload={"state": state, "attempts": max_attempts},
+                    result="error",
+                    error=str(exc),
                 )
-                record_event("webhook_delivery_ok")
+                record_event("webhook_delivery_error")
                 return
-            except Exception as exc:
-                is_last = attempt == attempts
-                if is_last:
-                    logger.exception(
-                        "webhook_delivery_failed",
-                        extra={
-                            "alarm_id": alarm_id,
-                            "state": state,
-                            "attempts": attempts,
-                            "error": str(exc),
-                        },
-                    )
-                    await log_notification(
-                        session,
-                        alarm_id=alarm.id,
-                        channel="webhook",
-                        target_id=None,
-                        payload={"state": state, "attempts": attempts},
-                        result="error",
-                        error=str(exc),
-                    )
-                    record_event("webhook_delivery_error")
-                    return
-                await asyncio.sleep(0.2 * attempt)
+            await asyncio.sleep(0.2 * attempt)

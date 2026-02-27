@@ -353,9 +353,13 @@ async def test_bulk_ack_enqueues_jobs_only_for_newly_acknowledged(
     assert payload["unchanged"] == 1
     assert payload["missing"] == []
 
-    queued_ack_jobs = [job for job in fake_redis.jobs if job[0] == "alarm_acked"]
+    queued_ack_jobs = [
+        job
+        for job in fake_redis.jobs
+        if job[0] == "process_alarm_event" and job[1][0].get("event_type") == "alarm.acknowledged"
+    ]
     assert len(queued_ack_jobs) == 1
-    assert queued_ack_jobs[0][1][0] == str(triggered_id)
+    assert queued_ack_jobs[0][1][0]["alarm_id"] == str(triggered_id)
 
 
 @pytest.mark.asyncio
@@ -425,8 +429,18 @@ async def test_admin_dashboard_requires_key_and_renders_alarms(
     assert unauthorized.status_code == 401
     assert authorized.status_code == 200
     assert "Alarm Operations Console" in authorized.text
-    assert str(alarm_id) in authorized.text
+    # UUID is displayed truncated to 8 characters
+    assert str(alarm_id)[:8] in authorized.text
     assert "triggered" in authorized.text
+    assert 'id="alarm-search"' in authorized.text
+    assert 'id="alarm-detail-modal"' in authorized.text
+    assert "<th>Actions</th>" in authorized.text
+    assert "Quick Ack" in authorized.text
+    assert "Quick Resolve" in authorized.text
+    assert "function showError(message)" in authorized.text
+    assert "async function acknowledgeAlarm(" in authorized.text
+    assert "async function resolveAlarm(" in authorized.text
+    assert 'const ADMIN_API_KEY = "dev-admin-key";' in authorized.text
 
 
 @pytest.mark.unit
@@ -434,6 +448,10 @@ def test_docs_index_links_exist() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     docs_index = repo_root / "docs" / "README.md"
     text = docs_index.read_text(encoding="utf-8")
+    candidates: set[str] = set()
+
+    for match in re.finditer(r"\[[^\]]+\]\(([^)]+\.md)\)", text):
+        candidates.add(match.group(1).strip())
 
     for line in text.splitlines():
         if "`" not in line:
@@ -442,6 +460,10 @@ def test_docs_index_links_exist() -> None:
         if len(parts) < 3:
             continue
         candidate = parts[1]
-        if not candidate.endswith(".md"):
+        if candidate.endswith(".md"):
+            candidates.add(candidate)
+
+    for candidate in sorted(candidates):
+        if candidate.startswith("http://") or candidate.startswith("https://"):
             continue
         assert (repo_root / "docs" / candidate).exists(), f"Missing doc: {candidate}"

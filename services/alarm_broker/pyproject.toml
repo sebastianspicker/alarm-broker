@@ -50,3 +50,8 @@ ignore = ["B008"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+  "unit: Fast isolated tests without external integrations.",
+  "integration: End-to-end tests across API, DB and queue boundaries.",
+  "security: Security regression and hardening tests.",
+]

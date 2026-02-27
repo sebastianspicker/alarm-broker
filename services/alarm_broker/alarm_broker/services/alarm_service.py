@@ -41,7 +41,16 @@ async def acknowledge_alarm(
     note: str | None = None,
 ) -> bool:
     if alarm.status != AlarmStatus.TRIGGERED:
-        return False
+        # Raise ConflictError instead of silently returning False
+        from alarm_broker.core.errors import ConflictError
+
+        raise ConflictError(
+            f"Cannot acknowledge alarm in {alarm.status.value} status",
+            details={
+                "current_status": alarm.status.value,
+                "expected_status": AlarmStatus.TRIGGERED.value,
+            },
+        )
 
     alarm.status = AlarmStatus.ACKNOWLEDGED
     alarm.acked_at = datetime.now(UTC)

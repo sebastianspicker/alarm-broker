@@ -44,6 +44,33 @@
       color: ${status_color};
       letter-spacing: 0.02em;
     }
+    .status-badge {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 0.78rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      background: #ecfdf3;
+      color: #065f46;
+    }
+    .status-badge.triggered {
+      background: #fef3c7;
+      color: #92400e;
+    }
+    .status-badge.acknowledged {
+      background: #dbeafe;
+      color: #1e3a8a;
+    }
+    .status-badge.resolved {
+      background: #dcfce7;
+      color: #166534;
+    }
+    .status-badge.cancelled {
+      background: #f3f4f6;
+      color: #374151;
+    }
     .info {
       margin: 0 0 18px;
       padding: 10px 12px;
@@ -51,6 +78,16 @@
       background: #f8fafc;
       border: 1px solid var(--border);
       color: var(--muted);
+    }
+    .info.success {
+      background: #ecfdf3;
+      border-color: #86efac;
+      color: #166534;
+    }
+    .info.warning {
+      background: #fff7ed;
+      border-color: #fdba74;
+      color: #9a3412;
     }
     label { display: block; font-weight: 600; margin-bottom: 8px; }
     input, textarea {
@@ -95,9 +132,11 @@
 <body>
   <main class="card" role="main">
     <h1>${headline}</h1>
+    <p><span class="status-badge ${status_badge_class}">${status_label}</span></p>
     <p class="status">Status: ${status_label}</p>
+    <p class="meta">${status_description}</p>
     <p class="meta"><strong>Person:</strong> ${person}<br><strong>Ort:</strong> ${room}<br><strong>Zeit:</strong> ${created}</p>
-    <p class="info">${info_message}</p>
+    <p class="info ${info_class}">${info_message}</p>
     ${form_block}
   </main>
 </body>

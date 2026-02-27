@@ -1,6 +1,6 @@
-# alarm-broker (MVP / Proof of Concept)
+# alarm-broker (Release Candidate)
 
-## DISCLAIMER (PLEASE READ)
+## ⚠️ DISCLAIMER
 
 This project is **work in progress** and currently **not a production-ready alarm broker**.
 
@@ -187,10 +187,18 @@ stateDiagram-v2
 - `deploy/` – Docker Compose + example seed file
 
 Main docs:
+- `docs/INSTALL.md` - Installation guide
+- `docs/OPERATIONS.md` - Operations guide
+- `docs/TROUBLESHOOTING.md` - Troubleshooting guide
 - `docs/ARCHITECTURE.md`
 - `docs/DATA_MODEL.md`
 - `docs/INTEGRATIONS.md`
-- `docs/archive/DEEP_CODE_INSPECTION_FINDINGS.md`
+- `docs/DEVELOPMENT.md`
+
+## Additional Resources
+
+- `SECURITY.md` - Security policy and best practices
+- `CHANGELOG.md` - Version history
 
 ## Requirements
 
@@ -249,6 +257,23 @@ Readiness check:
 ```bash
 curl -sS "http://localhost:8080/readyz" | jq .
 ```
+
+## Mock University Demo Screenshots
+
+### Admin Overview
+![Admin Overview](docs/assets/screenshots/01-admin-overview.png)
+
+### Alarm Detail Modal
+![Alarm Detail Modal](docs/assets/screenshots/04-admin-detail-modal.png)
+
+### ACK Page (Triggered, Mobile)
+![ACK Page Triggered Mobile](docs/assets/screenshots/06-ack-page-triggered-mobile.png)
+
+### ACK Page (Acknowledged, Mobile)
+![ACK Page Acknowledged Mobile](docs/assets/screenshots/07-ack-page-acknowledged-mobile.png)
+
+### Simulation Feed
+![Simulation Feed](docs/assets/screenshots/09-simulation-feed.png)
 
 ## Configuration
 

@@ -24,9 +24,11 @@ def require_admin(
     x_admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
     settings: Settings = Depends(get_app_settings),
 ) -> None:
+    # Return 403 if admin key is not configured instead of 500
     if not settings.admin_api_key:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Admin key not configured"
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin key not configured on server",
         )
     if not secrets.compare_digest(x_admin_key or "", settings.admin_api_key):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid admin key")

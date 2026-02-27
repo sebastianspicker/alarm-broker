@@ -83,7 +83,11 @@ alarm-broker/
 │   ├── ARCHITECTURE.md        # System architecture
 │   ├── DATA_MODEL.md          # Database schema
 │   ├── INTEGRATIONS.md        # External integrations
-│   └── DEVELOPMENT.md         # This file
+│   ├── DEVELOPMENT.md         # This file
+│   ├── OPERATIONS.md          # Runtime operations guide
+│   ├── TROUBLESHOOTING.md     # Failure patterns and remediation
+│   ├── DEMO_SCREENSHOTS.md    # Local demo and screenshot runbook
+│   └── ROADMAP.md             # Consolidated implementation roadmap
 ├── services/
 │   └── alarm_broker/
 │       ├── alarm_broker/      # Main application package
@@ -95,7 +99,6 @@ alarm-broker/
 │       │   └── worker/        # Background task workers
 │       ├── tests/             # Test suite
 │       └── pyproject.toml     # Python dependencies
-├── plans/                     # Improvement plans
 └── Makefile                   # Development commands
 ```
 
@@ -222,6 +225,17 @@ docker compose -f deploy/docker-compose.yml exec api alembic downgrade -1
 2. Verify Redis connection
 3. Check for stuck jobs in Redis
 
+## Local Demo Screenshots
+
+For reproducible local screenshots using the Mock University dataset:
+
+```bash
+python scripts/demo_prepare.py
+python scripts/demo_capture.py
+```
+
+See `docs/DEMO_SCREENSHOTS.md` for full scenario details and troubleshooting.
+
 ## Contributing
 
 1. Create a feature branch
@@ -229,9 +243,13 @@ docker compose -f deploy/docker-compose.yml exec api alembic downgrade -1
 3. Run `make lint test audit`
 4. Submit pull request
 
+Planning policy:
+- Keep long-lived implementation planning in `docs/ROADMAP.md`.
+- Do not reintroduce ad-hoc plan files under a top-level `plans/` directory.
+
 ## Security
 
-See `docs/archive/DEEP_CODE_INSPECTION_FINDINGS.md` for historical security findings and fixes.
+See the main README.md for security-related information and best practices.
 
 ### Reporting Security Issues
 

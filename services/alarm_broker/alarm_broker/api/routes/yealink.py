@@ -49,14 +49,22 @@ async def yealink_alarm(
     Raises:
         HTTPException: On validation or processing errors
     """
-    # Validate source IP
+    # Validate source IP (skip in simulation mode but log warning)
     client_ip = get_client_ip(request, settings)
-    if not ip_allowed(client_ip, settings.yelk_ip_allowlist):
-        logger.warning(
-            "ip_not_allowed",
-            extra={"client_ip": client_ip, "path": request.url.path},
-        )
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="IP not allowed")
+    if not settings.simulation_enabled:
+        if not ip_allowed(client_ip, settings.yelk_ip_allowlist):
+            logger.warning(
+                "ip_not_allowed",
+                extra={"client_ip": client_ip, "path": request.url.path},
+            )
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="IP not allowed")
+    else:
+        # In simulation mode, still validate but log for debugging
+        if settings.yelk_ip_allowlist and not ip_allowed(client_ip, settings.yelk_ip_allowlist):
+            logger.warning(
+                "ip_not_allowed_simulation",
+                extra={"client_ip": client_ip, "path": request.url.path},
+            )
 
     # Get device token
     token = request.query_params.get(settings.yelk_token_query_param)
@@ -67,12 +75,14 @@ async def yealink_alarm(
     redis = get_redis(request)
 
     # Create trigger service with current bucket values
+    # In simulation mode, disable rate limiting
+    rate_bucket = None if settings.simulation_enabled else minute_bucket()
     trigger = TriggerService(
         session,
         redis,
         settings,
         idempotency_bucket=bucket_10s(),
-        rate_limit_bucket=minute_bucket(),
+        rate_limit_bucket=rate_bucket,
     )
     result = await trigger.process_trigger(
         token=token,

@@ -170,6 +170,8 @@ class WebhookSettings(BaseSettings):
     webhook_url: AnyHttpUrl | None = None
     webhook_secret: str = ""
     webhook_timeout_seconds: int = Field(default=5, ge=1, le=60)
+    webhook_max_retries: int = Field(default=3, ge=1, le=10)
+    webhook_retry_delay_seconds: int = Field(default=30, ge=1, le=300)
 
     def is_enabled(self) -> bool:
         return self.webhook_enabled and self.webhook_url is not None
@@ -189,6 +191,27 @@ class EscalationSettings(BaseSettings):
     escalate_t1: int = Field(default=60, ge=0)
     escalate_t2: int = Field(default=180, ge=0)
     escalate_t3: int = Field(default=300, ge=0)
+
+
+class SimulationSettings(BaseSettings):
+    """Simulation/Demo mode settings.
+
+    When enabled, the system uses mock connectors instead of real external
+    services, allowing full demonstration without external dependencies.
+
+    Attributes:
+        simulation_enabled: Enable simulation mode with mock connectors
+        simulation_seed_url: URL to fetch demo seed data (optional, uses bundled data if empty)
+    """
+
+    model_config = SettingsConfigDict(env_prefix="", env_file=".env", extra="ignore")
+
+    simulation_enabled: bool = False
+    simulation_seed_url: str = ""
+
+    def is_enabled(self) -> bool:
+        """Check if simulation mode is enabled."""
+        return self.simulation_enabled
 
 
 class Settings(BaseSettings):
@@ -257,14 +280,20 @@ class Settings(BaseSettings):
 
     # Webhook callbacks
     webhook_enabled: bool = False
-    webhook_url: AnyHttpUrl | None = None
+    webhook_url: str = ""
     webhook_secret: str = ""
     webhook_timeout_seconds: int = Field(default=5, ge=1, le=60)
+    webhook_max_retries: int = Field(default=3, ge=1, le=10)
+    webhook_retry_delay_seconds: int = Field(default=30, ge=1, le=300)
 
     # Escalation timings
     escalate_t1: int = Field(default=60, ge=0)
     escalate_t2: int = Field(default=180, ge=0)
     escalate_t3: int = Field(default=300, ge=0)
+
+    # Simulation mode
+    simulation_enabled: bool = False
+    simulation_seed_url: str = ""
 
     # Convenience properties for grouped access
     @property
@@ -335,6 +364,8 @@ class Settings(BaseSettings):
             webhook_url=self.webhook_url,
             webhook_secret=self.webhook_secret,
             webhook_timeout_seconds=self.webhook_timeout_seconds,
+            webhook_max_retries=self.webhook_max_retries,
+            webhook_retry_delay_seconds=self.webhook_retry_delay_seconds,
         )
 
     @property
@@ -344,6 +375,14 @@ class Settings(BaseSettings):
             escalate_t1=self.escalate_t1,
             escalate_t2=self.escalate_t2,
             escalate_t3=self.escalate_t3,
+        )
+
+    @property
+    def simulation(self) -> SimulationSettings:
+        """Get simulation settings as a group."""
+        return SimulationSettings(
+            simulation_enabled=self.simulation_enabled,
+            simulation_seed_url=self.simulation_seed_url,
         )
 
 

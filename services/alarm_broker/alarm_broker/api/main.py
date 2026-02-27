@@ -126,6 +126,7 @@ def _install_security_headers_middleware(app: FastAPI) -> None:
     async def security_headers_middleware(request: Request, call_next):
         response = await call_next(request)
 
+        # Basic security headers
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
@@ -134,6 +135,19 @@ def _install_security_headers_middleware(app: FastAPI) -> None:
             "camera=(), geolocation=(), microphone=()",
         )
 
+        # HSTS header (only on HTTPS)
+        if request.url.scheme == "https":
+            response.headers.setdefault(
+                "Strict-Transport-Security",
+                "max-age=31536000; includeSubDomains",
+            )
+
+        # Content Security Policy (CSP)
+        # Default-src 'self' for same-origin, 'none' for others
+        csp_policy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+        response.headers.setdefault("Content-Security-Policy", csp_policy)
+
+        # Anti-caching for ACK pages (contains token in URL)
         if request.url.path.startswith("/a/"):
             response.headers["Cache-Control"] = "no-store"
             response.headers["Pragma"] = "no-cache"

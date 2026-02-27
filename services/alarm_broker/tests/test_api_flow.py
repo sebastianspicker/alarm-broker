@@ -33,8 +33,16 @@ async def test_yealink_idempotent_and_ack(
 
             assert alarm_id_1 == alarm_id_2
             assert [name for name, _args in fake_redis.jobs] == [
-                "alarm_created",
-                "alarm_state_changed",
+                "process_alarm_event",
+                "process_alarm_event",
+            ]
+            assert [args[0]["event_type"] for _name, args in fake_redis.jobs] == [
+                "alarm.created",
+                "alarm.state_changed",
+            ]
+            assert [args[0]["alarm_id"] for _name, args in fake_redis.jobs] == [
+                str(alarm_id_1),
+                str(alarm_id_1),
             ]
 
     async with sessionmaker() as session:
@@ -62,10 +70,16 @@ async def test_yealink_idempotent_and_ack(
         assert alarm2.status == AlarmStatus.ACKNOWLEDGED
 
     assert [name for name, _args in fake_redis.jobs] == [
-        "alarm_created",
-        "alarm_state_changed",
-        "alarm_acked",
-        "alarm_state_changed",
+        "process_alarm_event",
+        "process_alarm_event",
+        "process_alarm_event",
+        "process_alarm_event",
+    ]
+    assert [args[0]["event_type"] for _name, args in fake_redis.jobs] == [
+        "alarm.created",
+        "alarm.state_changed",
+        "alarm.acknowledged",
+        "alarm.state_changed",
     ]
 
 

@@ -19,6 +19,7 @@ async def admin_create_device(
     body: DeviceUpsertIn,
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, str]:
+    """Create or update a device. POST is used as it performs upsert."""
     device = await session.scalar(select(Device).where(Device.device_token == body.device_token))
     if not device:
         device = Device(
@@ -43,14 +44,6 @@ async def admin_create_device(
 
     await session.commit()
     return {"ok": "true", "device_id": device.id}
-
-
-@router.put("/devices")
-async def admin_update_device(
-    body: DeviceUpsertIn,
-    session: AsyncSession = Depends(get_session),
-) -> dict[str, str]:
-    return await admin_create_device(body, session)
 
 
 @router.post("/escalation-policy")
