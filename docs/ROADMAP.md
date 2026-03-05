@@ -1,76 +1,66 @@
 # Roadmap
 
-## Ziele und Leitplanken
+## Guiding Principles
 
-Diese Roadmap konsolidiert die bisherigen Planungsartefakte aus `plans/` in eine dauerhafte, wartbare Referenz.
+- No breaking changes to existing public endpoints.
+- Stability and API consistency take precedence over feature breadth.
+- UI improvements are additive and compatible with existing paths.
 
-Leitplanken:
-- Keine Breaking Changes an bestehenden öffentlichen Endpunkten.
-- Stabilität und API-Konsistenz haben Vorrang vor Feature-Breite.
-- UI-Verbesserungen sind additiv und kompatibel zu bestehenden Pfaden.
+## Completed
 
-## Stabilitäts- und Qualitätsziele
+### Phase 0: Baseline
+- Lint and test baseline established.
+- API and UI regressions covered by dedicated tests.
 
-1. Einheitliche Alarm-Transitionslogik (`ack`, `resolve`, `cancel`) für single und bulk.
-2. Kanonische Notes-Implementierung auf `POST /v1/alarms/{alarm_id}/notes`.
-3. Funktionale Simulation-Endpunkte unter `/v1/simulation/*`.
-4. Grüne Qualitätsgates: `ruff check .` und `pytest -q`.
-5. Konsistente Dokumentationsstruktur unter `docs/`.
+### Phase 1: Bug Fixes
+- Fixed double-retry in connector base (3x3=9 retries -> 3).
+- Fixed Signal dispatch routing through SMS handler.
+- Fixed hardcoded Zammad values; now read from connector config.
+- Removed unused TypeVar.
 
-## Umsetzungsphasen
+### Phase 2: Repository & Documentation Cleanup
+- Removed tracked screenshots from git, added to `.gitignore`.
+- Fixed `.DS_Store` gitignore pattern.
+- Consolidated docs: merged INSTALL+DEVELOPMENT into SETUP, removed DATA_MODEL/DEMO_SCREENSHOTS/TROUBLESHOOTING.
+- Translated German code comments and docstrings to English.
 
-## Phase 0: Baseline und Sicherheitsnetz
-- Lint- und Test-Baseline erfassen.
-- API- und UI-Regressionen über dedizierte Tests absichern.
+### Phase 3: Code Deduplication
+- Unified connector naming: renamed `*Connector` classes to canonical `*Client`, removed backward-compat aliases.
+- Removed `send_escalation_step` forwarding wrapper; callers use `send()` directly.
+- Deduplicated Zammad ticket payload construction via `_build_notification_payload`.
+- Fixed latent `ticket_id=` keyword arg bug in `_log_notification_result` call.
 
-## Phase 1: Repository- und Doku-Cleanup
-- Planungsartefakte aus `plans/` in `docs/` konsolidieren.
-- `docs/README.md` als kanonischen Index pflegen.
-- Temporäre/duplizierte Doku entfernen, operative Kerndoku behalten.
+### Phase 4: Settings Refactoring
+- Removed 9 unused group setting classes and 8 `@property` methods.
+- Flat `Settings` class with validators and convenience `is_*_enabled()` methods.
+- Reduced from ~397 lines to ~121 lines.
 
-## Phase 2: API-Konsistenz und Deduplizierung
-- Doppelte Routen und redundante Handler eliminieren.
-- Gemeinsame Helper für Zustandsübergänge und Bulk-Verarbeitung nutzen.
-- Response-Semantik für ähnliche Endpunkte vereinheitlichen.
+### Phase 5: Code Quality
+- Moved `import httpx` from function-level to module-level in notification service.
+- Replaced manual webhook retry loop with `tenacity` decorator.
 
-## Phase 3: Simulation reparieren
-- Notifications-, Status-, Clear- und Seed-Endpunkte stabilisieren.
-- Disabled-Mode bewusst fail-closed (404) behandeln.
-- Kanalzählungen und Statusausgaben testbar machen.
+### Phase 6: UI Improvements
+- Unified ACK page design system (Inter + JetBrains Mono fonts, consistent CSS variables, aligned colors).
+- Replaced `window.prompt()` with accessible inline confirmation modal (name + optional note).
+- Added loading states on action buttons (disable + "..." text during async calls).
+- Added success toast with auto-reload after 1.5s.
+- Added empty state message when search filter matches no alarms.
 
-## Phase 4: Service-Refactoring
-- Trigger-/Notification-/Worker-Logik in klarere Teilverantwortungen schneiden.
-- Event-Dispatch normalisieren und Altpfade schrittweise reduzieren.
+### Phase 7: Final Validation
+- All 49 tests pass, ruff clean.
+- Added targeted regression test: connector retry count (exactly 3 attempts).
 
-## Phase 5: Engineering-QoL
-- Ruff-Schulden abbauen (Importe, lange Zeilen, ungenutzte Symbole).
-- Typing und Signaturen konsolidieren.
-- Logging-Konventionen und Settings-Zugriff vereinheitlichen.
+## Backlog
 
-## Phase 6: UI-Verbesserungen
-- Admin-UI: robuste Quick-Actions, Fehlermeldungen, Suche, Modal-Details.
-- ACK-UI: klare Statusdarstellung, verbesserte Guidance bei bereits bearbeiteten Alarmen.
-- Simulation-Panel im Admin-UI für Status/Clear/Seed-Hinweise.
+1. Internal refactoring of large modules (`alarms.py`, `notification_service.py`, `trigger_service.py`, `worker/tasks.py`) into smaller units.
+2. Extended search/filter options for admin operations.
+3. TypedDict definitions for structured internal dictionaries.
+4. Exception handler consolidation in `api/main.py` (if pattern grows further).
+5. Additional integration tests for escalation scheduling and multi-channel dispatch.
 
-## Phase 7: QA und Abnahme
-- Regressionstests für Notes, Simulation, Alarm-Lifecycle und UI-Basiselemente.
-- Lint/Test/Smoke als Merge-Voraussetzung.
+## Definition of Done
 
-## Aktueller Fokus (laufender Integrationszyklus)
-
-- API-Konsistenz und Simulation-Stabilität priorisiert.
-- UI-Härtung für Admin/ACK mit Fokus auf Fehlerresistenz.
-- Dokumentationskonsolidierung abgeschlossen halten und künftig nur in `docs/` planen.
-
-## Backlog (nach Stabilitätsfokus)
-
-1. Weiteres internes Refactoring großer Module (`alarms.py`, `notification_service.py`, `trigger_service.py`, `worker/tasks.py`) in kleinere Unterbausteine.
-2. Erweiterte Such-/Filteroptionen für Admin-Operationen.
-3. Zusätzliche UX-Verbesserungen (z. B. bessere leere Zustände, feinere Bulk-Rückmeldungen).
-
-## Definition of Done für den Umbau
-
-- `plans/` entfernt und Inhalte in `docs/` integriert.
-- Einheitliche Notes-Route und stabile Simulation-Endpunkte mit Tests.
-- UI-Flows ohne bekannte Laufzeitfehler in den Kernpfaden.
-- Vollständiger grüner Qualitätssatz (Lint + Tests).
+- Consolidated documentation in `docs/` with `docs/README.md` as index.
+- Unified Notes route and stable simulation endpoints with tests.
+- UI flows without known runtime errors in core paths.
+- Full green quality gates (lint + tests).

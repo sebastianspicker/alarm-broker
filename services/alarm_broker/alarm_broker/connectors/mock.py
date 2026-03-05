@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from alarm_broker.connectors.zammad import ZammadConfig
+
 logger = logging.getLogger("alarm_broker")
 
 
@@ -131,7 +133,7 @@ def get_mock_store() -> MockNotificationStore:
 class MockZammadClient:
     """Mock Zammad connector for simulation mode.
 
-    This mock implements the same interface as ZammadConnector but stores
+    This mock implements the same interface as ZammadClient but stores
     all ticket operations instead of making real API calls.
     """
 
@@ -139,6 +141,12 @@ class MockZammadClient:
         """Initialize the mock Zammad client."""
         self._store = get_mock_store()
         self._enabled = True
+        self._config = ZammadConfig(enabled=True, base_url="http://mock-zammad")
+
+    @property
+    def config(self) -> ZammadConfig:
+        """Access the mock Zammad configuration."""
+        return self._config
 
     def enabled(self) -> bool:
         """Always return True in simulation mode."""
@@ -194,9 +202,6 @@ class MockZammadClient:
         )
 
 
-# Backward compatibility alias
-MockZammadConnector = MockZammadClient
-
 
 # =============================================================================
 # Mock SMS Connector
@@ -206,7 +211,7 @@ MockZammadConnector = MockZammadClient
 class MockSendXmsClient:
     """Mock SendXMS connector for simulation mode.
 
-    This mock implements the same interface as SendXmsConnector but stores
+    This mock implements the same interface as SendXmsClient but stores
     all SMS operations instead of making real API calls.
     """
 
@@ -239,9 +244,6 @@ class MockSendXmsClient:
         logger.info("mock_sms_sent", extra={"to": to, "message_length": len(message)})
 
 
-# Backward compatibility alias
-MockSendXmsConnector = MockSendXmsClient
-
 
 # =============================================================================
 # Mock Signal Connector
@@ -251,7 +253,7 @@ MockSendXmsConnector = MockSendXmsClient
 class MockSignalClient:
     """Mock Signal connector for simulation mode.
 
-    This mock implements the same interface as SignalConnector but stores
+    This mock implements the same interface as SignalClient but stores
     all Signal message operations instead of making real API calls.
     """
 
@@ -284,7 +286,3 @@ class MockSignalClient:
             "mock_signal_sent",
             extra={"group_id": group_id, "message_length": len(message)},
         )
-
-
-# Backward compatibility alias
-MockSignalConnector = MockSignalClient

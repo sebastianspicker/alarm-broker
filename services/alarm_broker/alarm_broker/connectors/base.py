@@ -48,6 +48,15 @@ class BaseConnector:
         self._http = http
         self._cfg = config
 
+    @property
+    def config(self) -> BaseConnectorConfig:
+        """Access the connector configuration.
+
+        Returns:
+            The connector's configuration object
+        """
+        return self._cfg
+
     def enabled(self) -> bool:
         """Check if the connector is enabled and properly configured.
 
@@ -112,11 +121,6 @@ class BaseConnector:
         response.raise_for_status()
         return response
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=0.5, max=5),
-        reraise=True,
-    )
     async def _post_with_retry(
         self,
         path: str,
@@ -125,6 +129,8 @@ class BaseConnector:
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         """Make a POST request with retry logic.
+
+        Delegates to _request_with_retry which handles retries.
 
         Args:
             path: URL path (appended to base_url)
@@ -136,11 +142,6 @@ class BaseConnector:
         """
         return await self._request_with_retry("POST", path, json=json, headers=headers)
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=0.5, max=5),
-        reraise=True,
-    )
     async def _put_with_retry(
         self,
         path: str,
@@ -149,6 +150,8 @@ class BaseConnector:
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         """Make a PUT request with retry logic.
+
+        Delegates to _request_with_retry which handles retries.
 
         Args:
             path: URL path (appended to base_url)

@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Callable, Coroutine
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, TypeVar
+from typing import Any
 
 from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
@@ -45,8 +45,6 @@ from alarm_broker.services.event_service import (
 
 router = APIRouter(prefix="/v1/alarms", dependencies=[Depends(require_admin)])
 logger = logging.getLogger("alarm_broker")
-
-T = TypeVar("T")
 
 
 async def _execute_bulk_operation(
@@ -611,15 +609,15 @@ async def patch_alarm(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> AlarmOut:
-    """Teilweises Update eines Alarms.
+    """Partial update of an alarm.
 
-    Aktualisiert nur die im Request-Body angegebenen Felder.
-    None-Werte werden ignoriert und nicht auf None gesetzt.
+    Only updates fields present in the request body.
+    None values are ignored.
     """
     alarm = await get_alarm_or_404(session, alarm_id)
     request.state.alarm_id = str(alarm.id)
 
-    # Aktualisiere nur Felder, die im Patch enthalten sind (nicht None)
+    # Only update fields present in the patch (not None)
     patch_data = patch.model_dump(exclude_none=True)
 
     if "title" in patch_data:
@@ -762,11 +760,11 @@ async def delete_alarm(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> None:
-    """Löscht einen Alarm (Soft-Delete).
+    """Soft-delete an alarm.
 
     Args:
         alarm_id: Alarm UUID
-        request: FastAPI request object (for Redis)
+        request: FastAPI request object
         session: Database session
 
     Returns:
@@ -774,22 +772,17 @@ async def delete_alarm(
     """
     from alarm_broker.api.deps import get_app_settings
 
-    # Alarm finden
     alarm = await get_alarm_or_404(session, alarm_id)
 
-    # Bereits gelöscht?
     if alarm.deleted_at is not None:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="Alarm wurde bereits gelöscht"
+            status_code=status.HTTP_409_CONFLICT, detail="Alarm already deleted"
         )
 
-    # Soft-Delete: Setze deleted_at Timestamp
     alarm.deleted_at = datetime.now()
 
-    # Admin-Key als deleted_by verwenden (aus dem Header)
     settings = get_app_settings(request)
     if settings.admin_api_key:
-        # Verwende einen kurzen Hash des Admin-Keys als Identifikation
         alarm.deleted_by = f"admin:{settings.admin_api_key[:8]}..."
 
     await session.commit()

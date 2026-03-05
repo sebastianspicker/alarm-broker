@@ -36,7 +36,7 @@ class SignalConfig(BaseConnectorConfig):
             object.__setattr__(self, "base_url", self.endpoint)
 
 
-class SignalConnector(BaseConnector):
+class SignalClient(BaseConnector):
     """Connector for Signal messaging integration.
 
     Provides methods for sending messages to Signal groups for alarm notifications.
@@ -68,7 +68,3 @@ class SignalConnector(BaseConnector):
         gid = group_id or self._signal_cfg.target_group_id
         payload = {"message": message, "groupId": gid}
         await self._post_with_retry(self._signal_cfg.send_path, json=payload)
-
-
-# Backward compatibility alias
-SignalClient = SignalConnector

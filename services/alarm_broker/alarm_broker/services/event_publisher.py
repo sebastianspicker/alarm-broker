@@ -1,4 +1,4 @@
-"""Event Publisher - Zentralisiert das Event-Enqueuing."""
+"""Event Publisher - Centralizes event enqueuing."""
 
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -18,10 +18,10 @@ if TYPE_CHECKING:
 
 
 class EventPublisher:
-    """Zentralisierter Event-Publisher für Alarm-Events.
+    """Centralized event publisher for alarm events.
 
-    Diese Klasse abstrahiert das Event-Enqueuing an einer zentralen Stelle
-    und bietet eine einfache API für das Publishing von Alarm-Events.
+    Abstracts event enqueuing into a single place and provides
+    a simple API for publishing alarm lifecycle events.
 
     Usage:
         publisher = EventPublisher(redis)
@@ -41,24 +41,24 @@ class EventPublisher:
         self._redis = redis
 
     async def publish_alarm_created(self, alarm_id: int | str, **kwargs: Any) -> None:
-        """Publish ein alarm.created Event.
+        """Publish an alarm.created event.
 
         Args:
-            alarm_id: ID des Alarms
-            **kwargs: Zusätzliche Payload-Felder
+            alarm_id: Alarm ID
+            **kwargs: Additional payload fields
         """
         await self._publish(event_type=EVENT_ALARM_CREATED, alarm_id=alarm_id, **kwargs)
 
     async def publish_alarm_acknowledged(
         self, alarm_id: int | str, acknowledged_by: str, note: str | None = None, **kwargs: Any
     ) -> None:
-        """Publish ein alarm.acknowledged Event.
+        """Publish an alarm.acknowledged event.
 
         Args:
-            alarm_id: ID des Alarms
-            acknowledged_by: Wer den Alarm bestätigt hat
-            note: Optionale Notiz
-            **kwargs: Zusätzliche Payload-Felder
+            alarm_id: Alarm ID
+            acknowledged_by: Who acknowledged the alarm
+            note: Optional note
+            **kwargs: Additional payload fields
         """
         await self._publish(
             event_type=EVENT_ALARM_ACKNOWLEDGED,
@@ -71,13 +71,13 @@ class EventPublisher:
     async def publish_alarm_resolved(
         self, alarm_id: int | str, resolved_by: str, note: str | None = None, **kwargs: Any
     ) -> None:
-        """Publish ein alarm.resolved Event.
+        """Publish an alarm.resolved event.
 
         Args:
-            alarm_id: ID des Alarms
-            resolved_by: Wer den Alarm gelöst hat
-            note: Optionale Notiz
-            **kwargs: Zusätzliche Payload-Felder
+            alarm_id: Alarm ID
+            resolved_by: Who resolved the alarm
+            note: Optional note
+            **kwargs: Additional payload fields
         """
         await self._publish(
             event_type=EVENT_ALARM_RESOLVED,
@@ -90,13 +90,13 @@ class EventPublisher:
     async def publish_alarm_cancelled(
         self, alarm_id: int | str, cancelled_by: str, note: str | None = None, **kwargs: Any
     ) -> None:
-        """Publish ein alarm.cancelled Event.
+        """Publish an alarm.cancelled event.
 
         Args:
-            alarm_id: ID des Alarms
-            cancelled_by: Wer den Alarm storniert hat
-            note: Optionale Notiz
-            **kwargs: Zusätzliche Payload-Felder
+            alarm_id: Alarm ID
+            cancelled_by: Who cancelled the alarm
+            note: Optional note
+            **kwargs: Additional payload fields
         """
         await self._publish(
             event_type=EVENT_ALARM_CANCELLED,
@@ -109,13 +109,13 @@ class EventPublisher:
     async def publish_alarm_state_changed(
         self, alarm_id: int | str, old_state: str, new_state: str, **kwargs: Any
     ) -> None:
-        """Publish ein alarm.state_changed Event.
+        """Publish an alarm.state_changed event.
 
         Args:
-            alarm_id: ID des Alarms
-            old_state: Vorheriger Status
-            new_state: Neuer Status
-            **kwargs: Zusätzliche Payload-Felder
+            alarm_id: Alarm ID
+            old_state: Previous status
+            new_state: New status
+            **kwargs: Additional payload fields
         """
         await self._publish(
             event_type=EVENT_ALARM_STATE_CHANGED,
@@ -126,12 +126,12 @@ class EventPublisher:
         )
 
     async def _publish(self, event_type: str, alarm_id: int | str, **kwargs: Any) -> None:
-        """Interne Methode zum tatsächlichen Enqueuen.
+        """Internal method for actual job enqueuing.
 
         Args:
-            event_type: Typ des Events
-            alarm_id: ID des Alarms
-            **kwargs: Zusätzliche Payload-Felder
+            event_type: Event type
+            alarm_id: Alarm ID
+            **kwargs: Additional payload fields
         """
         payload = {
             "event_type": event_type,
@@ -143,17 +143,17 @@ class EventPublisher:
 
     @classmethod
     def from_alarm(cls, redis: ArqRedis, alarm: "Alarm") -> "EventPublisher":
-        """Factory-Methode um einen Publisher mit Alarm-Context zu erstellen.
+        """Factory method to create a publisher with alarm context.
 
-        Diese Methode erstellt einen EventPublisher und bindet optional
-        zusätzliche Felder aus dem Alarm-Objekt.
+        Creates an EventPublisher and optionally binds additional
+        fields from the alarm object.
 
         Args:
             redis: ArqRedis instance
-            alarm: Alarm-Objekt
+            alarm: Alarm object
 
         Returns:
-            EventPublisher Instanz (funktioniert wie eine normale Instanz)
+            EventPublisher instance
         """
         # Return normal instance - alarm context can be passed via kwargs
         return cls(redis)

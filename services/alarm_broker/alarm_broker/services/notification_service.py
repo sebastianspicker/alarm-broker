@@ -10,6 +10,7 @@ import logging
 import uuid
 from typing import Any
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -275,7 +276,7 @@ class NotificationService:
             elif target.channel == "sms":
                 await self._send_sms_notifications(session, target, payload)
             elif target.channel == "signal":
-                await self._send_sms_notifications(session, target, payload)
+                await self._send_via_signal(session, target, payload["body"], payload)
             elif target.channel == "webhook":
                 await self._send_webhook_notifications(session, target, payload)
             else:
@@ -312,13 +313,14 @@ class NotificationService:
             return
 
         try:
-            # Format email payload for Zammad
+            # Format email payload for Zammad using connector config
+            zcfg = self._zammad.config
             email_payload = {
                 "title": payload["title"],
-                "group": "Notfallstelle",
+                "group": getattr(zcfg, "group", "Notfallstelle"),
                 "priority_id": payload["priority"],
-                "state_id": 1,
-                "customer_id": "guess:alarm-system@example.org",
+                "state_id": getattr(zcfg, "state_id_new", 1),
+                "customer_id": getattr(zcfg, "customer", "guess:alarm-system@example.org"),
                 "tags": payload["tags"],
                 "article": {
                     "subject": "Alarm ausgelöst (silent)",
@@ -327,10 +329,8 @@ class NotificationService:
                     "internal": True,
                 },
             }
-            ticket_id = await self._zammad.create_ticket(email_payload)
-            await self._log_notification_result(
-                session, target, payload, "ok", ticket_id=str(ticket_id)
-            )
+            await self._zammad.create_ticket(email_payload)
+            await self._log_notification_result(session, target, payload, "ok")
         except Exception as e:
             logger.exception(
                 "email_notification_failed",
@@ -430,10 +430,6 @@ class NotificationService:
             target: Target with webhook configuration
             payload: Notification payload to send
         """
-        # Note: This uses httpx for HTTP requests
-        # Import here to avoid circular dependencies
-        import httpx
-
         webhook_url = target.address
         if not webhook_url:
             await self._log_notification_result(
@@ -501,7 +497,7 @@ class NotificationService:
             alarm: Alarm instance
             enriched: Enriched alarm context
             ack_url: ACK URL for responders
-            settings: Application settings
+            settings: Application settings (unused, kept for API compat)
 
         Returns:
             Ticket ID if created, None otherwise
@@ -509,24 +505,18 @@ class NotificationService:
         if not self._zammad.enabled():
             return None
 
+        base = self._build_notification_payload(alarm, enriched, step_no=0, ack_url=ack_url)
+        zcfg = self._zammad.config
         payload = {
-            "title": f"NOTFALLALARM – {enriched['person_name']} – {enriched['room_label']}",
-            "group": settings.zammad_group,
-            "priority_id": settings.zammad_priority_id_p0,
-            "state_id": settings.zammad_state_id_new,
-            "customer_id": settings.zammad_customer,
-            "tags": [constants.TAG_EMERGENCY, constants.TAG_SILENT],
+            "title": base["title"],
+            "group": getattr(zcfg, "group", "Notfallstelle"),
+            "priority_id": base["priority"],
+            "state_id": getattr(zcfg, "state_id_new", 1),
+            "customer_id": getattr(zcfg, "customer", "guess:alarm-system@example.org"),
+            "tags": base["tags"],
             "article": {
                 "subject": "Alarm ausgelöst (silent)",
-                "body": format_alarm_message(
-                    alarm_id=str(alarm.id),
-                    person=str(enriched["person_name"]),
-                    room=str(enriched["room_label"]),
-                    site=str(enriched.get("site_name")) if enriched.get("site_name") else None,
-                    created_at=alarm.created_at,
-                    ack_url=ack_url,
-                    step_no=0,
-                ),
+                "body": base["body"],
                 "type": "note",
                 "internal": True,
             },
@@ -610,38 +600,6 @@ class NotificationService:
                 extra={"ticket_id": ticket_id, "error": str(e)},
             )
             return False
-
-    async def send_escalation_step(
-        self,
-        session: AsyncSession,
-        alarm: Alarm,
-        enriched: dict[str, Any],
-        *,
-        step_no: int,
-        ack_url: str,
-        policy_id: str = "default",
-    ) -> None:
-        """Send notifications for an escalation step.
-
-        This method is kept for backward compatibility. It delegates to
-        the new send() method for the actual notification logic.
-
-        Args:
-            session: Database session
-            alarm: Alarm instance
-            enriched: Enriched alarm context
-            step_no: Escalation step number
-            ack_url: ACK URL for responders
-            policy_id: Escalation policy ID
-        """
-        await self.send(
-            session=session,
-            alarm=alarm,
-            enriched=enriched,
-            step_no=step_no,
-            ack_url=ack_url,
-            policy_id=policy_id,
-        )
 
     async def get_escalation_schedule(
         self,

@@ -1,4 +1,4 @@
-.DS_Store
+**/.DS_Store
 .env
 .env.*
 !.env.example
@@ -26,3 +26,6 @@ build/
 node_modules/
 
 deploy/pgdata/
+
+# Generated screenshot assets (regenerate with scripts/demo_capture.py)
+docs/assets/screenshots/*.png

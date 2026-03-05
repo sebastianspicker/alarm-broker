@@ -35,7 +35,7 @@ class ZammadConfig(BaseConnectorConfig):
     customer: str = "guess:alarm-system@example.org"
 
 
-class ZammadConnector(BaseConnector):
+class ZammadClient(BaseConnector):
     """Connector for Zammad helpdesk integration.
 
     Provides methods for creating tickets and adding internal notes
@@ -108,7 +108,3 @@ class ZammadConnector(BaseConnector):
             }
         }
         await self._put_with_retry(f"/api/v1/tickets/{ticket_id}", json=payload)
-
-
-# Backward compatibility alias
-ZammadClient = ZammadConnector

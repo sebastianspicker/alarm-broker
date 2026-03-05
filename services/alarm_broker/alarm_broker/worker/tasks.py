@@ -8,13 +8,13 @@ This module contains the arq worker tasks that handle:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from alarm_broker import constants
 from alarm_broker.connectors.zammad import ZammadClient
@@ -118,8 +118,8 @@ async def alarm_created(ctx: dict, alarm_id: str) -> None:
             await session.commit()
 
         # Send stage 0 notifications
-        await notification.send_escalation_step(
-            session, alarm, enriched, step_no=0, ack_url=ack_url
+        await notification.send(
+            session=session, alarm=alarm, enriched=enriched, step_no=0, ack_url=ack_url
         )
 
         # Schedule future escalation steps
@@ -170,8 +170,8 @@ async def escalate(ctx: dict, alarm_id: str, step_no: int) -> None:
         enriched = await enrich_alarm_context(session, alarm)
         ack_url = f"{settings.base_url}/a/{alarm.ack_token}"
 
-        await notification.send_escalation_step(
-            session, alarm, enriched, step_no=step_no, ack_url=ack_url
+        await notification.send(
+            session=session, alarm=alarm, enriched=enriched, step_no=step_no, ack_url=ack_url
         )
 
         logger.info(
@@ -308,6 +308,13 @@ def _build_webhook_payload(alarm: Alarm, state: str) -> dict[str, Any]:
     }
 
 
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=0.2, max=2), reraise=True)
+async def _post_webhook(http: Any, url: str, payload: dict, headers: dict, timeout: float) -> None:
+    """POST webhook with tenacity retry (3 attempts, exponential backoff)."""
+    response = await http.post(url, json=payload, headers=headers, timeout=float(timeout))
+    response.raise_for_status()
+
+
 async def _send_webhook_with_retry(
     http: Any,
     webhook_url: str,
@@ -317,61 +324,31 @@ async def _send_webhook_with_retry(
     alarm_id: uuid.UUID,
     session: AsyncSession,
     state: str,
-    max_attempts: int = 3,
 ) -> None:
-    """Send webhook with exponential backoff retry.
-
-    Args:
-        http: HTTP client
-        webhook_url: URL to send webhook to
-        payload: JSON payload
-        headers: HTTP headers
-        timeout: Request timeout in seconds
-        alarm_id: Alarm ID for logging
-        session: Database session
-        state: State for logging
-        max_attempts: Maximum retry attempts
-    """
-    for attempt in range(1, max_attempts + 1):
-        try:
-            response = await http.post(
-                webhook_url,
-                json=payload,
-                headers=headers,
-                timeout=float(timeout),
-            )
-            response.raise_for_status()
-            await log_notification(
-                session,
-                alarm_id=alarm_id,
-                channel="webhook",
-                target_id=None,
-                payload={"state": state, "attempt": attempt},
-                result="ok",
-            )
-            record_event("webhook_delivery_ok")
-            return
-        except Exception as exc:
-            is_last = attempt == max_attempts
-            if is_last:
-                logger.exception(
-                    "webhook_delivery_failed",
-                    extra={
-                        "alarm_id": str(alarm_id),
-                        "state": state,
-                        "attempts": max_attempts,
-                        "error": str(exc),
-                    },
-                )
-                await log_notification(
-                    session,
-                    alarm_id=alarm_id,
-                    channel="webhook",
-                    target_id=None,
-                    payload={"state": state, "attempts": max_attempts},
-                    result="error",
-                    error=str(exc),
-                )
-                record_event("webhook_delivery_error")
-                return
-            await asyncio.sleep(0.2 * attempt)
+    """Send webhook with retry and audit logging."""
+    try:
+        await _post_webhook(http, webhook_url, payload, headers, timeout)
+        await log_notification(
+            session,
+            alarm_id=alarm_id,
+            channel="webhook",
+            target_id=None,
+            payload={"state": state},
+            result="ok",
+        )
+        record_event("webhook_delivery_ok")
+    except Exception as exc:
+        logger.exception(
+            "webhook_delivery_failed",
+            extra={"alarm_id": str(alarm_id), "state": state, "error": str(exc)},
+        )
+        await log_notification(
+            session,
+            alarm_id=alarm_id,
+            channel="webhook",
+            target_id=None,
+            payload={"state": state},
+            result="error",
+            error=str(exc),
+        )
+        record_event("webhook_delivery_error")

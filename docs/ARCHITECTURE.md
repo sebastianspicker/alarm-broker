@@ -66,6 +66,16 @@ Repeated transition to same target state is idempotent (`204`).
 
 `/readyz` returns `503` if one dependency is unavailable.
 
+## Data model (PostgreSQL)
+
+Core tables:
+- **Master data**: `sites`, `rooms` (FK sites), `persons`, `devices` (token mapping)
+- **Escalation config**: `escalation_targets`, `escalation_policy`, `escalation_steps` (composite PK: policy_id, step_no, target_id)
+- **Alarms**: `alarms` (UUID PK, status lifecycle, context, integration fields, JSON meta)
+- **Audit**: `alarm_notifications` (channel, target_id, payload, result, error), `alarm_notes`
+
+`devices.device_token` is the inbound trigger anchor. `alarms.ack_token` provides the capability URL.
+
 ## API notes
 
 - Existing endpoints remain backward-compatible.

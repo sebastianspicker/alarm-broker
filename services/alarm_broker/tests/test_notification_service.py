@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from sqlalchemy import select
 
+from alarm_broker.connectors.base import BaseConnector, BaseConnectorConfig
 from alarm_broker.db.models import Alarm, AlarmNotification, AlarmStatus
 from alarm_broker.services.notification_service import NotificationService
 
@@ -76,3 +79,18 @@ async def test_add_zammad_ack_note_logs_with_real_alarm_id(sessionmaker, seeded_
     assert row is not None
     assert row.payload.get("action") == "ack_update"
     assert row.payload.get("ticket_id") == 42
+
+
+@pytest.mark.asyncio
+async def test_connector_retry_exactly_3_times():
+    """Verify _post_with_retry causes exactly 3 attempts, not 9 (regression test)."""
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.request = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
+
+    config = BaseConnectorConfig(enabled=True, base_url="http://example.test")
+    connector = BaseConnector(mock_http, config)
+
+    with pytest.raises(httpx.ConnectError):
+        await connector._post_with_retry("/test", json={"a": 1})
+
+    assert mock_http.request.call_count == 3

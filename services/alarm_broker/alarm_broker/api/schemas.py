@@ -145,7 +145,7 @@ class AlarmExportIn(BaseModel):
 
 
 class AlarmPatchSchema(BaseModel):
-    """Schema für teilweises Update eines Alarms."""
+    """Schema for partial alarm updates."""
 
     title: str | None = None
     description: str | None = None

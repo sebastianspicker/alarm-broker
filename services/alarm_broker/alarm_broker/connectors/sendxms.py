@@ -32,7 +32,7 @@ class SendXmsConfig(BaseConnectorConfig):
     send_path: str = "/send"
 
 
-class SendXmsConnector(BaseConnector):
+class SendXmsClient(BaseConnector):
     """Connector for SendXMS SMS provider integration.
 
     Provides methods for sending SMS messages for alarm notifications.
@@ -67,7 +67,3 @@ class SendXmsConnector(BaseConnector):
             json=payload,
             headers={"Authorization": f"Bearer {self._sms_cfg.api_key}"},
         )
-
-
-# Backward compatibility alias
-SendXmsClient = SendXmsConnector

@@ -302,7 +302,18 @@
     }
 
     .error-banner::before {
-      content: '⚠️';
+      content: '\26A0\FE0F';
+    }
+
+    #success-toast::before {
+      content: '\2705';
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 48px 24px;
+      color: var(--text-muted);
+      font-size: 0.95rem;
     }
 
     .table-wrap {
@@ -692,6 +703,36 @@
     </section>
   </div>
 
+  <!-- Confirmation Modal (replaces window.prompt) -->
+  <div id="confirm-modal" class="modal-overlay" hidden aria-hidden="true">
+    <section class="modal-card" style="max-width:420px">
+      <header class="modal-header">
+        <h2 id="confirm-modal-title" class="modal-title">Confirm Action</h2>
+      </header>
+      <div style="padding:20px;display:flex;flex-direction:column;gap:14px">
+        <label style="font-size:0.85rem;color:var(--text-muted);font-weight:500">
+          Operator Identity
+          <input id="confirm-name-input" type="text" class="search-input" value="Admin UI"
+                 style="margin-top:6px;width:100%">
+        </label>
+        <label style="font-size:0.85rem;color:var(--text-muted);font-weight:500">
+          Note (optional)
+          <input id="confirm-note-input" type="text" class="search-input" placeholder="Optional note"
+                 style="margin-top:6px;width:100%">
+        </label>
+      </div>
+      <div class="modal-actions">
+        <button id="confirm-ok-btn" type="button" class="btn btn-ack">Confirm</button>
+        <button id="confirm-cancel-btn" type="button" class="btn" data-close-confirm="true">Cancel</button>
+      </div>
+    </section>
+  </div>
+
+  <!-- Success toast -->
+  <div id="success-toast" class="error-banner" role="status" hidden
+       style="position:fixed;bottom:24px;right:24px;z-index:200;border-color:rgba(16,185,129,0.3);background:rgba(16,185,129,0.15);color:#a7f3d0;max-width:360px">
+  </div>
+
   <script>
     const ADMIN_API_KEY = ${admin_key_json};
     const modalElement = document.getElementById('alarm-detail-modal');
@@ -709,6 +750,44 @@
     const detailResolveBtn = document.getElementById('detail-resolve-btn');
     const modalState = { alarmId: null };
 
+    const confirmModal = document.getElementById('confirm-modal');
+    const confirmNameInput = document.getElementById('confirm-name-input');
+    const confirmNoteInput = document.getElementById('confirm-note-input');
+    const confirmOkBtn = document.getElementById('confirm-ok-btn');
+    const confirmCancelBtn = document.getElementById('confirm-cancel-btn');
+    const confirmTitle = document.getElementById('confirm-modal-title');
+    const successToast = document.getElementById('success-toast');
+    let confirmResolve = null;
+
+    function showConfirmModal(title) {
+      confirmTitle.textContent = title || 'Confirm Action';
+      confirmNameInput.value = 'Admin UI';
+      confirmNoteInput.value = '';
+      confirmModal.hidden = false;
+      confirmModal.setAttribute('aria-hidden', 'false');
+      confirmNameInput.focus();
+      return new Promise(function(resolve) {
+        confirmResolve = resolve;
+      });
+    }
+
+    function closeConfirmModal(result) {
+      confirmModal.hidden = true;
+      confirmModal.setAttribute('aria-hidden', 'true');
+      if (confirmResolve) {
+        confirmResolve(result);
+        confirmResolve = null;
+      }
+    }
+
+    confirmOkBtn.addEventListener('click', function() {
+      closeConfirmModal({ name: confirmNameInput.value || 'Admin UI', note: confirmNoteInput.value || null });
+    });
+    confirmCancelBtn.addEventListener('click', function() { closeConfirmModal(null); });
+    confirmNameInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') { e.preventDefault(); confirmOkBtn.click(); }
+    });
+
     function showError(message) {
       errorElement.textContent = message;
       errorElement.hidden = false;
@@ -716,6 +795,16 @@
       showError.timeoutId = window.setTimeout(() => {
         errorElement.hidden = true;
       }, 6000);
+    }
+
+    function showSuccess(message) {
+      successToast.textContent = message;
+      successToast.hidden = false;
+      window.clearTimeout(showSuccess.timeoutId);
+      showSuccess.timeoutId = window.setTimeout(() => {
+        successToast.hidden = true;
+        window.location.reload();
+      }, 1500);
     }
 
     function setDetailField(id, value) {
@@ -816,22 +905,20 @@
     }
 
     async function acknowledgeAlarm(alarmId) {
-      const ackedBy = window.prompt('Operator Identity', 'Admin UI');
-      if (ackedBy === null) {
-        return;
-      }
+      var result = await showConfirmModal('Acknowledge Alarm');
+      if (!result) return;
       await postAction('/v1/alarms/' + encodeURIComponent(alarmId) + '/ack', {
-        acked_by: ackedBy || 'Admin UI',
+        acked_by: result.name,
+        note: result.note,
       });
     }
 
     async function resolveAlarm(alarmId) {
-      const actor = window.prompt('Resolving Official', 'Admin UI');
-      if (actor === null) {
-        return;
-      }
+      var result = await showConfirmModal('Resolve Alarm');
+      if (!result) return;
       await postAction('/v1/alarms/' + encodeURIComponent(alarmId) + '/resolve', {
-        actor: actor || 'Admin UI',
+        actor: result.name,
+        note: result.note,
       });
     }
 
@@ -843,11 +930,24 @@
         const haystack = (row.dataset.search || row.textContent || '').toLowerCase();
         const isMatch = !query || haystack.includes(query);
         row.classList.toggle('row-hidden', !isMatch);
-        if (isMatch) {
-          visible += 1;
-        }
+        if (isMatch) visible += 1;
       });
       searchHint.textContent = visible + ' matching records';
+
+      var emptyEl = document.getElementById('search-empty-state');
+      if (query && visible === 0) {
+        if (!emptyEl) {
+          emptyEl = document.createElement('div');
+          emptyEl.id = 'search-empty-state';
+          emptyEl.className = 'empty-state';
+          var tableWrap = document.querySelector('.table-wrap');
+          if (tableWrap) tableWrap.parentNode.insertBefore(emptyEl, tableWrap.nextSibling);
+        }
+        emptyEl.textContent = 'No alarms matching "' + searchInput.value.trim() + '"';
+        emptyEl.hidden = false;
+      } else if (emptyEl) {
+        emptyEl.hidden = true;
+      }
     }
 
     document.addEventListener('click', async (event) => {
@@ -866,10 +966,14 @@
       const ackButton = event.target.closest('.quick-ack-btn');
       if (ackButton) {
         const row = ackButton.closest('tr.alarm-row');
+        ackButton.disabled = true;
+        ackButton.textContent = '...';
         try {
           await acknowledgeAlarm(row.dataset.alarmId);
-          window.location.reload();
+          showSuccess('Alarm acknowledged');
         } catch (error) {
+          ackButton.disabled = false;
+          ackButton.textContent = 'Ack';
           showError(error.message || 'Acknowledge failed');
         }
         return;
@@ -878,42 +982,53 @@
       const resolveButton = event.target.closest('.quick-resolve-btn');
       if (resolveButton) {
         const row = resolveButton.closest('tr.alarm-row');
+        resolveButton.disabled = true;
+        resolveButton.textContent = '...';
         try {
           await resolveAlarm(row.dataset.alarmId);
-          window.location.reload();
+          showSuccess('Alarm resolved');
         } catch (error) {
+          resolveButton.disabled = false;
+          resolveButton.textContent = 'Resolve';
           showError(error.message || 'Resolve failed');
         }
       }
     });
 
     detailAckBtn.addEventListener('click', async () => {
-      if (!modalState.alarmId) {
-        return;
-      }
+      if (!modalState.alarmId) return;
+      detailAckBtn.disabled = true;
+      detailAckBtn.textContent = '...';
       try {
         await acknowledgeAlarm(modalState.alarmId);
-        window.location.reload();
+        closeDetailModal();
+        showSuccess('Alarm acknowledged');
       } catch (error) {
+        detailAckBtn.disabled = false;
+        detailAckBtn.textContent = 'Engage (Ack)';
         showError(error.message || 'Acknowledge failed');
       }
     });
 
     detailResolveBtn.addEventListener('click', async () => {
-      if (!modalState.alarmId) {
-        return;
-      }
+      if (!modalState.alarmId) return;
+      detailResolveBtn.disabled = true;
+      detailResolveBtn.textContent = '...';
       try {
         await resolveAlarm(modalState.alarmId);
-        window.location.reload();
+        closeDetailModal();
+        showSuccess('Alarm resolved');
       } catch (error) {
+        detailResolveBtn.disabled = false;
+        detailResolveBtn.textContent = 'Mark Resolved';
         showError(error.message || 'Resolve failed');
       }
     });
 
     document.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape' && !modalElement.hidden) {
-        closeDetailModal();
+      if (event.key === 'Escape') {
+        if (!confirmModal.hidden) { closeConfirmModal(null); return; }
+        if (!modalElement.hidden) { closeDetailModal(); }
       }
     });
 

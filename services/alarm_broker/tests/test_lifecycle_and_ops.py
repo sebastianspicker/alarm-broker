@@ -428,7 +428,7 @@ async def test_admin_dashboard_requires_key_and_renders_alarms(
 
     assert unauthorized.status_code == 401
     assert authorized.status_code == 200
-    assert "Alarm Operations Console" in authorized.text
+    assert "Mission Control" in authorized.text
     # UUID is displayed truncated to 8 characters
     assert str(alarm_id)[:8] in authorized.text
     assert "triggered" in authorized.text

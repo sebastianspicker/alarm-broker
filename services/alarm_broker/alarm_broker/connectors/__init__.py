@@ -15,25 +15,22 @@ from alarm_broker.connectors.mock import (
     MockZammadClient,
     get_mock_store,
 )
-from alarm_broker.connectors.sendxms import SendXmsClient, SendXmsConfig, SendXmsConnector
-from alarm_broker.connectors.signal import SignalClient, SignalConfig, SignalConnector
-from alarm_broker.connectors.zammad import ZammadClient, ZammadConfig, ZammadConnector
+from alarm_broker.connectors.sendxms import SendXmsClient, SendXmsConfig
+from alarm_broker.connectors.signal import SignalClient, SignalConfig
+from alarm_broker.connectors.zammad import ZammadClient, ZammadConfig
 
 __all__ = [
     # Base classes
     "BaseConnector",
     "BaseConnectorConfig",
     # Zammad
-    "ZammadConnector",
-    "ZammadClient",  # Backward compatibility alias
+    "ZammadClient",
     "ZammadConfig",
     # SendXMS
-    "SendXmsConnector",
-    "SendXmsClient",  # Backward compatibility alias
+    "SendXmsClient",
     "SendXmsConfig",
     # Signal
-    "SignalConnector",
-    "SignalClient",  # Backward compatibility alias
+    "SignalClient",
     "SignalConfig",
     # Mock/Simulation
     "MockZammadClient",

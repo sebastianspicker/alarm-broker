@@ -1,6 +1,6 @@
-"""Wiederverwendbare Konstanten für das Alarm-Broker-Projekt."""
+"""Reusable constants for the alarm-broker project."""
 
-# Alarm Prioritäten
+# Alarm priorities
 PRIORITY_CRITICAL = "P0"
 PRIORITY_HIGH = "P1"
 PRIORITY_MEDIUM = "P2"
@@ -12,14 +12,14 @@ PRIORITY_ALL = [PRIORITY_CRITICAL, PRIORITY_HIGH, PRIORITY_MEDIUM, PRIORITY_LOW]
 TAG_EMERGENCY = "notfall"
 TAG_SILENT = "silent"
 
-# API Default-Werte
+# API defaults
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
 
-# Default-Werte für Alarme
+# Alarm defaults
 DEFAULT_SEVERITY = PRIORITY_CRITICAL
 
-# Event-Typen
+# Event types
 EVENT_ALARM_CREATED = "alarm.created"
 EVENT_ALARM_ACKNOWLEDGED = "alarm.acknowledged"
 EVENT_ALARM_RESOLVED = "alarm.resolved"
