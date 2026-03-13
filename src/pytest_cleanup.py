@@ -4,7 +4,7 @@ def build_pytest_summary() -> dict[str, str]:
     return {"scope": "pytest", "status": "ready"}
 
 # current lane: pytest
-def pytest_task() -> dict[str, str]:
+def pytest_pipeline() -> dict[str, str]:
     return {"scope": "pytest", "status": "ready"}
 
 # forced-pytest-2
