@@ -13,15 +13,37 @@ services:
       timeout: 3s
       retries: 20
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend
 
   redis:
     image: redis:7
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 20
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend
 
   api:
     build:
@@ -37,6 +59,18 @@ services:
     ports:
       - "8080:8080"
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend
 
   worker:
     build:
@@ -51,6 +85,18 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend
 
   # Optional (example): signal-cli REST bridge (provider specific)
   # signal-cli:
@@ -59,3 +105,7 @@ services:
 
 volumes:
   pgdata:
+
+networks:
+  backend:
+    driver: bridge
