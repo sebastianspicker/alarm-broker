@@ -29,3 +29,6 @@ Some setup details still depend on the current local workflow and may change aga
 - Simplified the next maintenance pass through pytest.
 
 - Earlier scratch notes were compressed into the current guidance.
+
+## Revision Notes
+Latest pass: result during maintenance burst work (forced-result-19).

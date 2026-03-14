@@ -19,4 +19,4 @@ Early notes are still uneven and may be folded into clearer sections later.
 Some setup details still depend on the current local workflow and may change again.
 
 ## Revision Notes
-Latest pass: next-js during steady build work (forced-next-js-9).
+Latest pass: result during maintenance burst work (forced-result-23).
