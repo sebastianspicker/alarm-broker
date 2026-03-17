@@ -1,5 +1,5 @@
 # Build stage
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
 WORKDIR /build
 
@@ -18,7 +18,7 @@ COPY services/alarm_broker/ /build/
 RUN pip install --no-cache-dir /build
 
 # Production stage
-FROM python:3.12-slim AS production
+FROM python:3.14-slim AS production
 
 # Install runtime library for PostgreSQL
 RUN apt-get update && apt-get install -y --no-install-recommends \
