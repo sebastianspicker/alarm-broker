@@ -29,7 +29,6 @@ class EventPublisher:
         await publisher.publish_alarm_acknowledged(alarm_id=123, acknowledged_by="user@example.com")
     """
 
-    # Job name for processing alarm events
     JOB_NAME = "process_alarm_event"
 
     def __init__(self, redis: ArqRedis):

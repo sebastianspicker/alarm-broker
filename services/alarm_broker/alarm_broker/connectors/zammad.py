@@ -1,8 +1,4 @@
-"""Zammad connector for ticket management.
-
-This module provides integration with Zammad helpdesk for creating
-and updating tickets related to alarm events.
-"""
+"""Zammad connector for ticket management."""
 
 from __future__ import annotations
 

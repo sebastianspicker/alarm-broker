@@ -13,9 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Install Python dependencies
-COPY services/alarm_broker/pyproject.toml /build/
-RUN pip install --no-cache-dir -e /build
+# Install Python dependencies (copy source to resolve editable install)
+COPY services/alarm_broker/ /build/
+RUN pip install --no-cache-dir /build
 
 # Production stage
 FROM python:3.12-slim AS production

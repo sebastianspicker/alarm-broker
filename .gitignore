@@ -34,7 +34,6 @@ deploy/pgdata/
 *.pfx
 credentials.json
 service-account*.json
-.secrets.baseline
 
 # Generated screenshot assets (regenerate with scripts/demo_capture.py)
 docs/assets/screenshots/*.png

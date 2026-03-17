@@ -1,23 +1,15 @@
 from __future__ import annotations
 
-import uuid
-
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from alarm_broker.api.main import create_app
 from alarm_broker.connectors.mock import get_mock_store
+from tests.conftest import trigger_alarm as _trigger_alarm
 
 pytestmark = [pytest.mark.integration]
 
 
-async def _trigger_alarm(client: AsyncClient) -> uuid.UUID:
-    response = await client.get("/v1/yealink/alarm", params={"token": "YLK_T54W_3F9A"})
-    assert response.status_code == 200, response.text
-    return uuid.UUID(response.json()["alarm_id"])
-
-
-@pytest.mark.asyncio
 async def test_notes_endpoint_is_canonical_and_compatible(engine, seeded_db, fake_redis, settings):
     settings.admin_api_key = "dev-admin-key"
     app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
@@ -78,7 +70,6 @@ async def test_notes_endpoint_is_canonical_and_compatible(engine, seeded_db, fak
             assert [item["note_type"] for item in payload] == ["manual", "manual", "manual"]
 
 
-@pytest.mark.asyncio
 async def test_simulation_endpoints_return_404_when_disabled(
     engine, seeded_db, fake_redis, settings
 ):
@@ -103,7 +94,6 @@ async def test_simulation_endpoints_return_404_when_disabled(
                 assert response.json()["detail"] == "Simulation endpoint not found"
 
 
-@pytest.mark.asyncio
 async def test_simulation_endpoints_work_when_enabled(engine, seeded_db, fake_redis, settings):
     settings.admin_api_key = "dev-admin-key"
     settings.simulation_enabled = True
@@ -182,7 +172,6 @@ async def test_simulation_endpoints_work_when_enabled(engine, seeded_db, fake_re
     store.clear()
 
 
-@pytest.mark.asyncio
 async def test_admin_ui_simulation_panel_state(engine, seeded_db, fake_redis, settings):
     settings.admin_api_key = "dev-admin-key"
     settings.simulation_enabled = True

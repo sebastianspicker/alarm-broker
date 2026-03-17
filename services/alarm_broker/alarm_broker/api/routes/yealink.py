@@ -1,7 +1,4 @@
-"""Yealink alarm trigger routes.
-
-This module provides the endpoint for Yealink phone alarm triggers.
-"""
+"""Yealink alarm trigger routes."""
 
 from __future__ import annotations
 
@@ -28,27 +25,7 @@ async def yealink_alarm(
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_app_settings),
 ) -> TriggerResponse:
-    """Handle Yealink alarm trigger.
-
-    This endpoint receives alarm triggers from Yealink phones and:
-    1. Validates the source IP
-    2. Checks idempotency to prevent duplicates
-    3. Enforces rate limits
-    4. Validates the device token
-    5. Creates the alarm
-    6. Enqueues notification tasks
-
-    Args:
-        request: FastAPI request
-        session: Database session
-        settings: Application settings
-
-    Returns:
-        TriggerResponse with alarm_id and status
-
-    Raises:
-        HTTPException: On validation or processing errors
-    """
+    """Handle Yealink alarm trigger."""
     # Validate source IP (skip in simulation mode but log warning)
     client_ip = get_client_ip(request, settings)
     if not settings.simulation_enabled:
@@ -66,15 +43,12 @@ async def yealink_alarm(
                 extra={"client_ip": client_ip, "path": request.url.path},
             )
 
-    # Get device token
     token = request.query_params.get(settings.yelk_token_query_param)
     if not token:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing token")
 
-    # Get Redis connection
     redis = get_redis(request)
 
-    # Create trigger service with current bucket values
     # In simulation mode, disable rate limiting
     rate_bucket = None if settings.simulation_enabled else minute_bucket()
     trigger = TriggerService(
@@ -91,7 +65,6 @@ async def yealink_alarm(
         event=request.query_params.get("event"),
     )
 
-    # Handle result
     if not result.success:
         raise HTTPException(
             status_code=result.error_code or 500,

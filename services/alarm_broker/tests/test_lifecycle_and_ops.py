@@ -10,17 +10,11 @@ from httpx import ASGITransport, AsyncClient
 
 from alarm_broker.api.main import create_app
 from alarm_broker.db.models import Alarm, AlarmStatus
+from tests.conftest import trigger_alarm as _trigger_alarm
 
 pytestmark = [pytest.mark.integration]
 
 
-async def _trigger_alarm(client: AsyncClient) -> uuid.UUID:
-    response = await client.get("/v1/yealink/alarm", params={"token": "YLK_T54W_3F9A"})
-    assert response.status_code == 200, response.text
-    return uuid.UUID(response.json()["alarm_id"])
-
-
-@pytest.mark.asyncio
 async def test_readyz_healthy(engine, seeded_db, fake_redis, settings):
     app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
 
@@ -33,7 +27,6 @@ async def test_readyz_healthy(engine, seeded_db, fake_redis, settings):
     assert response.json()["ok"] == "true"
 
 
-@pytest.mark.asyncio
 async def test_readyz_redis_unhealthy_returns_503(engine, seeded_db, settings):
     class BrokenRedis:
         async def get(self, _key: str):
@@ -50,7 +43,6 @@ async def test_readyz_redis_unhealthy_returns_503(engine, seeded_db, settings):
     assert response.json()["redis"] == "down"
 
 
-@pytest.mark.asyncio
 async def test_readyz_db_unhealthy_returns_503(engine, seeded_db, fake_redis, settings):
     class BrokenSessionmaker:
         def __call__(self):
@@ -74,7 +66,6 @@ async def test_readyz_db_unhealthy_returns_503(engine, seeded_db, fake_redis, se
     assert response.json()["db"] == "down"
 
 
-@pytest.mark.asyncio
 async def test_alarm_resolve_success_and_invalid_transition(
     engine, sessionmaker, seeded_db, fake_redis, settings
 ):
@@ -108,7 +99,6 @@ async def test_alarm_resolve_success_and_invalid_transition(
         assert alarm.resolved_at is not None
 
 
-@pytest.mark.asyncio
 async def test_alarm_resolve_idempotent(engine, seeded_db, fake_redis, settings):
     settings.admin_api_key = "dev-admin-key"
     app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
@@ -133,7 +123,6 @@ async def test_alarm_resolve_idempotent(engine, seeded_db, fake_redis, settings)
     assert second.status_code == 204
 
 
-@pytest.mark.asyncio
 async def test_alarm_transition_rejects_oversized_actor(engine, seeded_db, fake_redis, settings):
     settings.admin_api_key = "dev-admin-key"
     app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
@@ -151,7 +140,6 @@ async def test_alarm_transition_rejects_oversized_actor(engine, seeded_db, fake_
     assert response.status_code == 422
 
 
-@pytest.mark.asyncio
 async def test_alarm_pagination_cursor(engine, sessionmaker, seeded_db, fake_redis, settings):
     settings.admin_api_key = "dev-admin-key"
 
@@ -205,7 +193,6 @@ async def test_alarm_pagination_cursor(engine, sessionmaker, seeded_db, fake_red
             assert len(page_2.json()) >= 1
 
 
-@pytest.mark.asyncio
 async def test_bulk_resolve_reports_changed_unchanged_and_missing(
     engine, sessionmaker, seeded_db, fake_redis, settings
 ):
@@ -283,7 +270,6 @@ async def test_bulk_resolve_reports_changed_unchanged_and_missing(
         assert updated.resolved_by == "BulkOps"
 
 
-@pytest.mark.asyncio
 async def test_bulk_ack_enqueues_jobs_only_for_newly_acknowledged(
     engine, sessionmaker, seeded_db, fake_redis, settings
 ):
@@ -362,7 +348,6 @@ async def test_bulk_ack_enqueues_jobs_only_for_newly_acknowledged(
     assert queued_ack_jobs[0][1][0]["alarm_id"] == str(triggered_id)
 
 
-@pytest.mark.asyncio
 async def test_metrics_endpoint_exposes_prometheus_text(engine, seeded_db, fake_redis, settings):
     app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
 
@@ -391,7 +376,6 @@ async def test_metrics_endpoint_exposes_prometheus_text(engine, seeded_db, fake_
     assert int(match.group(1)) >= 1
 
 
-@pytest.mark.asyncio
 async def test_admin_dashboard_requires_key_and_renders_alarms(
     engine, sessionmaker, seeded_db, fake_redis, settings
 ):

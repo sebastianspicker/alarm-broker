@@ -1,9 +1,4 @@
-"""Simulation mode API routes.
-
-This module provides endpoints for demonstration and testing purposes
-when simulation mode is enabled. These endpoints allow viewing mock
-notifications that were sent during the simulation.
-"""
+"""Simulation mode API routes (enabled only when SIMULATION_ENABLED=true)."""
 
 from __future__ import annotations
 

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import uuid
 from collections.abc import AsyncIterator
 
 import pytest
 import pytest_asyncio
+from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from alarm_broker.api.main import create_app
@@ -107,3 +109,10 @@ def fake_redis() -> FakeRedis:
 @pytest.fixture
 def app(settings: Settings, engine: AsyncEngine, fake_redis: FakeRedis):
     return create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
+
+
+async def trigger_alarm(client: AsyncClient) -> uuid.UUID:
+    """Shared helper: trigger an alarm via the Yealink endpoint and return the alarm UUID."""
+    response = await client.get("/v1/yealink/alarm", params={"token": "YLK_T54W_3F9A"})
+    assert response.status_code == 200, response.text
+    return uuid.UUID(response.json()["alarm_id"])

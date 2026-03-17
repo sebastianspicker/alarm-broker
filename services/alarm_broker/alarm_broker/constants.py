@@ -25,20 +25,3 @@ EVENT_ALARM_ACKNOWLEDGED = "alarm.acknowledged"
 EVENT_ALARM_RESOLVED = "alarm.resolved"
 EVENT_ALARM_CANCELLED = "alarm.cancelled"
 EVENT_ALARM_STATE_CHANGED = "alarm.state_changed"
-
-
-# Notification Messages
-def EMERGENCY_ALARM_TITLE(title: str) -> str:
-    return f"NOTFALLALARM – {title}"
-
-
-def ALARM_ACKNOWLEDGED_TITLE(title: str) -> str:
-    return f"Alarm bestätigt: {title}"
-
-
-def ALARM_RESOLVED_TITLE(title: str) -> str:
-    return f"Alarm gelöst: {title}"
-
-
-def ALARM_CANCELLED_TITLE(title: str) -> str:
-    return f"Alarm storniert: {title}"

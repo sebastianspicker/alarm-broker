@@ -1,8 +1,4 @@
-"""SMS connector for SendXMS provider.
-
-This module provides integration with SendXMS or compatible SMS providers
-for sending alarm notifications via SMS.
-"""
+"""SMS connector for SendXMS provider."""
 
 from __future__ import annotations
 

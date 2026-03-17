@@ -40,9 +40,9 @@ async def _alarm_counts(session: AsyncSession) -> dict[str, int]:
     rows = (
         await session.execute(select(Alarm.status, func.count(Alarm.id)).group_by(Alarm.status))
     ).all()
-    counts = {status.value: 0 for status in AlarmStatus}
-    for status, count in rows:
-        counts[status.value] = int(count)
+    counts = {s.value: 0 for s in AlarmStatus}
+    for alarm_status, count in rows:
+        counts[alarm_status.value] = int(count)
     return counts
 
 

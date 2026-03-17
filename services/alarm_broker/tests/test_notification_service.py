@@ -27,7 +27,6 @@ class _DummyNoop:
     pass
 
 
-@pytest.mark.asyncio
 async def test_add_zammad_ack_note_logs_with_real_alarm_id(sessionmaker, seeded_db):
     alarm_id = uuid.uuid4()
     now = datetime.now(UTC)
@@ -81,7 +80,6 @@ async def test_add_zammad_ack_note_logs_with_real_alarm_id(sessionmaker, seeded_
     assert row.payload.get("ticket_id") == 42
 
 
-@pytest.mark.asyncio
 async def test_connector_retry_exactly_3_times():
     """Verify _post_with_retry causes exactly 3 attempts, not 9 (regression test)."""
     mock_http = AsyncMock(spec=httpx.AsyncClient)

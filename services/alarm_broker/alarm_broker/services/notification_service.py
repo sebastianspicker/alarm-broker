@@ -1,8 +1,4 @@
-"""Notification service for handling external communications.
-
-This service encapsulates the logic for sending notifications through
-various channels (Zammad, SMS, Signal) and logging the results.
-"""
+"""Notification dispatch to Zammad, SMS, and Signal with audit logging."""
 
 from __future__ import annotations
 
@@ -93,23 +89,7 @@ class NotificationService:
         ack_url: str,
         policy_id: str = "default",
     ) -> None:
-        """Main orchestrator for sending notifications across all channels.
-
-        This method coordinates the notification flow by:
-        1. Building the notification payload
-        2. Fetching escalation targets
-        3. Sending to each enabled channel
-        4. Logging results
-
-        Args:
-            session: Database session
-            alarm: Alarm instance
-            enriched: Enriched alarm context
-            step_no: Escalation step number
-            ack_url: ACK URL for responders
-            policy_id: Escalation policy ID
-        """
-        # Build notification payload
+        """Build payload, fetch escalation targets, dispatch to each enabled channel."""
         payload = self._build_notification_payload(
             alarm=alarm,
             enriched=enriched,
@@ -117,10 +97,8 @@ class NotificationService:
             ack_url=ack_url,
         )
 
-        # Fetch escalation targets for this step
         targets = await self._get_escalation_targets(session, policy_id, step_no)
 
-        # Send to each target's preferred channel
         for target in targets:
             if not target.enabled:
                 continue
@@ -147,7 +125,6 @@ class NotificationService:
         Returns:
             Dictionary containing title, body, tags, and priority
         """
-        # Build message body
         body = format_alarm_message(
             alarm_id=str(alarm.id),
             person=str(enriched["person_name"]),
@@ -158,14 +135,9 @@ class NotificationService:
             step_no=step_no,
         )
 
-        # Determine severity-based priority
         severity = enriched.get("severity", constants.PRIORITY_CRITICAL)
         priority = self._get_priority_for_severity(severity)
-
-        # Build title based on severity
         title = self._build_title(enriched, step_no)
-
-        # Set tags based on step and severity
         tags = self._build_tags(step_no, severity)
 
         return {
@@ -227,6 +199,31 @@ class NotificationService:
         if severity == constants.PRIORITY_CRITICAL:
             tags.append(constants.TAG_SILENT)
         return tags
+
+    def _build_zammad_ticket_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Build the Zammad ticket dict from a notification payload.
+
+        Args:
+            payload: Notification payload containing title, priority, tags, body.
+
+        Returns:
+            Zammad API ticket dict ready for `create_ticket`.
+        """
+        zcfg = self._zammad.config  # ZammadConfig (has group, state_id_new, customer)
+        return {
+            "title": payload["title"],
+            "group": zcfg.group,
+            "priority_id": payload["priority"],
+            "state_id": zcfg.state_id_new,
+            "customer_id": zcfg.customer,
+            "tags": payload["tags"],
+            "article": {
+                "subject": "Alarm ausgelöst (silent)",
+                "body": payload["body"],
+                "type": "note",
+                "internal": True,
+            },
+        }
 
     async def _get_escalation_targets(
         self,
@@ -313,23 +310,7 @@ class NotificationService:
             return
 
         try:
-            # Format email payload for Zammad using connector config
-            zcfg = self._zammad.config
-            email_payload = {
-                "title": payload["title"],
-                "group": getattr(zcfg, "group", "Notfallstelle"),
-                "priority_id": payload["priority"],
-                "state_id": getattr(zcfg, "state_id_new", 1),
-                "customer_id": getattr(zcfg, "customer", "guess:alarm-system@example.org"),
-                "tags": payload["tags"],
-                "article": {
-                    "subject": "Alarm ausgelöst (silent)",
-                    "body": payload["body"],
-                    "type": "note",
-                    "internal": True,
-                },
-            }
-            await self._zammad.create_ticket(email_payload)
+            await self._zammad.create_ticket(self._build_zammad_ticket_payload(payload))
             await self._log_notification_result(session, target, payload, "ok")
         except Exception as e:
             logger.exception(
@@ -344,26 +325,14 @@ class NotificationService:
         target: EscalationTarget,
         payload: dict[str, Any],
     ) -> None:
-        """Send SMS notification via Signal or SendXMS.
-
-        Tries Signal first, falls back to SendXMS if Signal fails.
-        Failure in one provider does not affect the other.
+        """Send SMS notification via SendXMS.
 
         Args:
             session: Database session
             target: Target with SMS configuration
             payload: Notification payload
         """
-        message = payload["body"]
-
-        # Try Signal first
-        if target.channel == "signal":
-            await self._send_via_signal(session, target, message, payload)
-            return
-
-        # Try SendXMS for SMS
-        if target.channel == "sms":
-            await self._send_via_sendxms(session, target, message, payload)
+        await self._send_via_sendxms(session, target, payload["body"], payload)
 
     async def _send_via_signal(
         self,
@@ -506,24 +475,9 @@ class NotificationService:
             return None
 
         base = self._build_notification_payload(alarm, enriched, step_no=0, ack_url=ack_url)
-        zcfg = self._zammad.config
-        payload = {
-            "title": base["title"],
-            "group": getattr(zcfg, "group", "Notfallstelle"),
-            "priority_id": base["priority"],
-            "state_id": getattr(zcfg, "state_id_new", 1),
-            "customer_id": getattr(zcfg, "customer", "guess:alarm-system@example.org"),
-            "tags": base["tags"],
-            "article": {
-                "subject": "Alarm ausgelöst (silent)",
-                "body": base["body"],
-                "type": "note",
-                "internal": True,
-            },
-        }
 
         try:
-            ticket_id = await self._zammad.create_ticket(payload)
+            ticket_id = await self._zammad.create_ticket(self._build_zammad_ticket_payload(base))
             await log_notification(
                 session,
                 alarm_id=alarm.id,

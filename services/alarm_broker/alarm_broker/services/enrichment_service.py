@@ -29,4 +29,5 @@ async def enrich_alarm_context(session: AsyncSession, alarm: Alarm) -> dict[str,
     enriched["person_name"] = person_name
     enriched["room_label"] = room_label
     enriched["site_name"] = site_name
+    enriched["severity"] = alarm.severity
     return enriched

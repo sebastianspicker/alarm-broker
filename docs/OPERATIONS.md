@@ -21,12 +21,13 @@ curl -sS http://localhost:8080/readyz
 
 The application exposes Prometheus-compatible metrics at `/metrics`.
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| alarm_broker_alarms_total | Counter | Total alarms processed |
-| alarm_broker_notifications_total | Counter | Total notifications sent |
-| alarm_broker_webhook_duration_seconds | Histogram | Webhook request duration |
-| alarm_broker_active_alarms | Gauge | Currently active alarms |
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `alarm_broker_http_requests_total` | Counter | method, route, status_code | HTTP request count |
+| `alarm_broker_http_request_duration_ms_total` | Counter | method, route, status_code | Cumulative request duration (ms) |
+| `alarm_broker_alarms_by_status` | Gauge | status | Alarm count per lifecycle state |
+| `alarm_broker_notifications_total` | Counter | channel, result | Notification attempts by channel and outcome |
+| `alarm_broker_events_total` | Counter | event | Internal events (webhook_delivery_ok, etc.) |
 
 ## Simulation Mode Operations
 
@@ -117,30 +118,11 @@ cp /data/dump.rdb backup/dump_$(date +%Y%m%d).rdb
 
 ### Database Connection Pool
 
-Default pool settings can be overridden:
-
-```bash
-DATABASE_POOL_SIZE=20
-DATABASE_MAX_OVERFLOW=10
-DATABASE_POOL_TIMEOUT=30
-```
+Pool settings are configured in `db/engine.py`. The defaults (pool_size=5, max_overflow=10) are appropriate for low-traffic deployments. To change them, edit `create_async_engine_from_url` or pass engine kwargs there — there are no env vars for this today.
 
 ### Worker Concurrency
 
-Configure worker concurrency in docker-compose:
-
-```yaml
-services:
-  worker:
-    environment:
-      WORKER_CONCURRENCY: 5
-```
-
-### Redis Connection
-
-```bash
-REDIS_MAX_CONNECTIONS=50
-```
+arq worker concurrency is set in `WorkerSettings` in `worker/settings.py`. To change it, set the `max_jobs` class attribute. There's no env var for this currently.
 
 ## Troubleshooting
 
@@ -199,8 +181,8 @@ redis-cli INFO clients
 3. Review webhook retry configuration
 
 ```bash
-# Monitor webhook duration
-curl -sS http://localhost:8080/metrics | grep webhook_duration
+# Monitor webhook delivery events
+curl -sS http://localhost:8080/metrics | grep alarm_broker_events_total
 ```
 
 ### Debug Mode

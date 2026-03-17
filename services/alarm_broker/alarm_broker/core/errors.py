@@ -1,8 +1,4 @@
-"""Custom exception hierarchy for the alarm broker.
-
-This module provides a standardized exception hierarchy for consistent
-error handling across the application.
-"""
+"""Custom exception hierarchy for the alarm broker."""
 
 from __future__ import annotations
 

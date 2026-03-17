@@ -16,24 +16,24 @@ test-verbose:
 
 # Linting & Formatting
 lint:
-	cd services/alarm_broker && ruff format --check services/alarm_broker
-	cd services/alarm_broker && ruff check services/alarm_broker
+	ruff format --check services/alarm_broker
+	ruff check services/alarm_broker
 
 lint-fix:
-	cd services/alarm_broker && ruff format services/alarm_broker
-	cd services/alarm_broker && ruff check --fix services/alarm_broker
+	ruff format services/alarm_broker
+	ruff check --fix services/alarm_broker
 
 format:
-	cd services/alarm_broker && ruff format services/alarm_broker
+	ruff format services/alarm_broker
 
 format-check:
-	cd services/alarm_broker && ruff format --check services/alarm_broker
+	ruff format --check services/alarm_broker
 
 # Security & Dependency Audit
 audit:
-	cd services/alarm_broker && ruff check services/alarm_broker
-	cd services/alarm_broker && bandit -q -r services/alarm_broker/alarm_broker
-	cd services/alarm_broker && pip-audit services/alarm_broker
+	ruff check services/alarm_broker
+	bandit -q -r services/alarm_broker/alarm_broker
+	cd services/alarm_broker && pip-audit
 
 # Pre-commit hooks
 pre-commit:

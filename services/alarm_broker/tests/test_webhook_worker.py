@@ -4,7 +4,6 @@ import uuid
 from datetime import UTC, datetime
 
 import httpx
-import pytest
 import respx
 from sqlalchemy import select
 
@@ -12,7 +11,6 @@ from alarm_broker.db.models import Alarm, AlarmNotification, AlarmStatus
 from alarm_broker.worker.tasks import alarm_state_changed
 
 
-@pytest.mark.asyncio
 async def test_alarm_state_changed_posts_webhook_and_logs_result(
     sessionmaker,
     seeded_db,

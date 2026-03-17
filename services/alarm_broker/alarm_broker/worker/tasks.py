@@ -1,13 +1,10 @@
-"""Background worker tasks for alarm processing.
-
-This module contains the arq worker tasks that handle:
-- Initial alarm processing and notification fan-out
-- Escalation scheduling and execution
-- ACK notification handling
-"""
+"""arq worker tasks: alarm fan-out, escalation, ACK handling, webhooks."""
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -83,18 +80,7 @@ def _get_notification_service(ctx: dict) -> NotificationService:
 
 
 async def alarm_created(ctx: dict, alarm_id: str) -> None:
-    """Process a newly created alarm.
-
-    This task is enqueued when an alarm is triggered. It:
-    1. Enriches the alarm context
-    2. Creates a Zammad ticket (if configured)
-    3. Sends stage 0 notifications
-    4. Schedules escalation steps
-
-    Args:
-        ctx: Worker context with sessionmaker, settings, and connectors
-        alarm_id: UUID string of the alarm
-    """
+    """Enrich context, open Zammad ticket, send stage 0 notifications, schedule escalations."""
     alarm_uuid = uuid.UUID(alarm_id)
     sessionmaker = ctx["sessionmaker"]
     settings = ctx["settings"]
@@ -109,7 +95,6 @@ async def alarm_created(ctx: dict, alarm_id: str) -> None:
         enriched = await enrich_alarm_context(session, alarm)
         ack_url = f"{settings.base_url}/a/{alarm.ack_token}"
 
-        # Create Zammad ticket
         ticket_id = await notification.handle_zammad_ticket(
             session, alarm, enriched, ack_url, settings
         )
@@ -122,7 +107,6 @@ async def alarm_created(ctx: dict, alarm_id: str) -> None:
             session=session, alarm=alarm, enriched=enriched, step_no=0, ack_url=ack_url
         )
 
-        # Schedule future escalation steps
         schedule = await notification.get_escalation_schedule(session)
         for step_no, after_seconds in schedule:
             await ctx["redis"].enqueue_job(
@@ -248,9 +232,7 @@ async def alarm_state_changed(ctx: dict, alarm_id: str, state: str) -> None:
         state: New alarm state value
     """
     settings = ctx["settings"]
-    webhook_url = getattr(settings, "webhook_url", None)
-    webhook_enabled = getattr(settings, "webhook_enabled", False)
-    if not webhook_enabled or not webhook_url:
+    if not settings.is_webhook_enabled():
         return
 
     alarm_uuid = uuid.UUID(alarm_id)
@@ -267,14 +249,20 @@ async def alarm_state_changed(ctx: dict, alarm_id: str, state: str) -> None:
             return
 
         payload = _build_webhook_payload(alarm, state)
+        payload_bytes = json.dumps(payload, separators=(",", ":")).encode()
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if settings.webhook_secret:
-            headers["X-Webhook-Secret"] = settings.webhook_secret
+            sig = hmac.new(
+                settings.webhook_secret.encode(),
+                payload_bytes,
+                hashlib.sha256,
+            ).hexdigest()
+            headers["X-Hub-Signature-256"] = f"sha256={sig}"
 
         await _send_webhook_with_retry(
             http=http,
-            webhook_url=webhook_url,
-            payload=payload,
+            webhook_url=settings.webhook_url,
+            payload_bytes=payload_bytes,
             headers=headers,
             timeout=settings.webhook_timeout_seconds,
             alarm_id=alarm.id,
@@ -309,16 +297,18 @@ def _build_webhook_payload(alarm: Alarm, state: str) -> dict[str, Any]:
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=0.2, max=2), reraise=True)
-async def _post_webhook(http: Any, url: str, payload: dict, headers: dict, timeout: float) -> None:
+async def _post_webhook(
+    http: Any, url: str, payload_bytes: bytes, headers: dict, timeout: float
+) -> None:
     """POST webhook with tenacity retry (3 attempts, exponential backoff)."""
-    response = await http.post(url, json=payload, headers=headers, timeout=float(timeout))
+    response = await http.post(url, content=payload_bytes, headers=headers, timeout=float(timeout))
     response.raise_for_status()
 
 
 async def _send_webhook_with_retry(
     http: Any,
     webhook_url: str,
-    payload: dict[str, Any],
+    payload_bytes: bytes,
     headers: dict[str, str],
     timeout: float,
     alarm_id: uuid.UUID,
@@ -327,7 +317,7 @@ async def _send_webhook_with_retry(
 ) -> None:
     """Send webhook with retry and audit logging."""
     try:
-        await _post_webhook(http, webhook_url, payload, headers, timeout)
+        await _post_webhook(http, webhook_url, payload_bytes, headers, timeout)
         await log_notification(
             session,
             alarm_id=alarm_id,

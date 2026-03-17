@@ -43,8 +43,15 @@ If you discover a security vulnerability, please report it by creating a GitHub 
 
 ### Security Headers
 
-- CORS configuration available
-- Security headers can be added via middleware
+Security headers are applied unconditionally by `_install_security_headers_middleware`:
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: DENY`
+- `Referrer-Policy: no-referrer`
+- `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'`
+- `Strict-Transport-Security` (HTTPS requests only)
+- `Cache-Control: no-store` on ACK pages (`/a/...`) to prevent token caching
+
+CORS is not configured. The service is designed for same-origin access behind a reverse proxy.
 
 ## Best Practices
 
@@ -63,5 +70,5 @@ If you discover a security vulnerability, please report it by creating a GitHub 
 We use `pip-audit` in CI to check for known vulnerabilities in dependencies.
 
 ```bash
-pip-audit services/alarm_broker
+cd services/alarm_broker && pip-audit
 ```

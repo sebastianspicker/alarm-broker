@@ -1,10 +1,4 @@
-"""Health check endpoints for monitoring and readiness.
-
-This module provides endpoints for:
-- Basic liveness check (/healthz)
-- Readiness check with dependency status (/readyz)
-- Detailed health information (/healthz/details)
-"""
+"""Health check endpoints: /healthz, /readyz, /healthz/details, /metrics."""
 
 from __future__ import annotations
 
@@ -91,14 +85,7 @@ async def healthz_details(
     sessionmaker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
     settings: Settings = Depends(get_app_settings),
 ) -> JSONResponse:
-    """Detailed health information.
-
-    Returns comprehensive health status including:
-    - Application version and uptime
-    - Database connectivity and migration version
-    - Redis connectivity
-    - Connector status (Zammad, SMS, Signal)
-    """
+    """Detailed health information: version, uptime, DB + Redis status, connector config."""
     details: dict[str, Any] = {
         "application": {
             "name": "alarm-broker",
@@ -110,15 +97,12 @@ async def healthz_details(
         "connectors": {},
     }
 
-    # Check database
     db_status = await _check_database(sessionmaker)
     details["dependencies"]["database"] = db_status
 
-    # Check Redis
     redis_status = await _check_redis(request)
     details["dependencies"]["redis"] = redis_status
 
-    # Check connectors
     details["connectors"]["zammad"] = {
         "enabled": bool(settings.zammad_api_token),
         "base_url": str(settings.zammad_base_url) if settings.zammad_api_token else None,
@@ -159,7 +143,6 @@ async def _check_database(sessionmaker: async_sessionmaker[AsyncSession]) -> dic
     """
     try:
         async with sessionmaker() as session:
-            # Check connectivity
             await session.execute(text("SELECT 1"))
 
             # Get migration version (if alembic_version table exists)

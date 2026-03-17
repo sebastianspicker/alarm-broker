@@ -12,7 +12,6 @@ from alarm_broker.db.models import Alarm, AlarmStatus
 pytestmark = [pytest.mark.integration]
 
 
-@pytest.mark.asyncio
 async def test_yealink_idempotent_and_ack(
     engine, sessionmaker, seeded_db, fake_redis, settings, monkeypatch
 ):
@@ -83,7 +82,6 @@ async def test_yealink_idempotent_and_ack(
     ]
 
 
-@pytest.mark.asyncio
 async def test_rate_limit_applies_only_to_new_alarms(
     engine, seeded_db, fake_redis, settings, monkeypatch
 ):

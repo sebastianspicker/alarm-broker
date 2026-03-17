@@ -6,14 +6,14 @@ import json
 import logging
 import uuid
 from collections.abc import Callable, Coroutine
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
 from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import and_, or_, select
+from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alarm_broker.api.deps import get_redis, get_session, require_admin
@@ -122,17 +122,17 @@ class SortField(StrEnum):
 
 
 def _apply_alarm_filters(
-    stmt,
-    status=None,
-    severity=None,
-    person_id=None,
-    room_id=None,
-    site_id=None,
-    device_id=None,
-    source=None,
-    created_after=None,
-    created_before=None,
-):
+    stmt: Select,
+    status: AlarmStatus | None = None,
+    severity: str | None = None,
+    person_id: str | None = None,
+    room_id: str | None = None,
+    site_id: str | None = None,
+    device_id: str | None = None,
+    source: str | None = None,
+    created_after: datetime | None = None,
+    created_before: datetime | None = None,
+) -> Select:
     """Apply common filter parameters to an alarm query.
 
     Args:
@@ -357,7 +357,6 @@ async def export_alarms(
     else:
         output = io.StringIO()
         if alarms:
-            # Get field names from first alarm
             field_names = [
                 "id",
                 "status",
@@ -383,7 +382,6 @@ async def export_alarms(
             writer.writeheader()
             for alarm in alarms:
                 row = {k: getattr(alarm, k, None) for k in field_names}
-                # Convert datetime to ISO format
                 for dt_field in ["created_at", "acked_at", "resolved_at", "cancelled_at"]:
                     if row[dt_field]:
                         row[dt_field] = row[dt_field].isoformat()
@@ -404,8 +402,6 @@ async def alarm_stats(
 
     Returns counts by status, severity, and time-based aggregations.
     """
-    from sqlalchemy import func
-
     # Count by status
     status_counts = (
         await session.execute(select(Alarm.status, func.count(Alarm.id)).group_by(Alarm.status))
@@ -705,7 +701,6 @@ async def list_alarm_notes(
     Returns:
         List of alarm notes ordered by creation time
     """
-    # Verify alarm exists
     await get_alarm_or_404(session, alarm_id)
 
     notes = (
@@ -775,11 +770,9 @@ async def delete_alarm(
     alarm = await get_alarm_or_404(session, alarm_id)
 
     if alarm.deleted_at is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="Alarm already deleted"
-        )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Alarm already deleted")
 
-    alarm.deleted_at = datetime.now()
+    alarm.deleted_at = datetime.now(UTC)
 
     settings = get_app_settings(request)
     if settings.admin_api_key:

@@ -60,14 +60,12 @@ async def admin_dashboard(
 ) -> HTMLResponse:
     _ensure_admin_key(settings, key)
 
-    # Build query with optional status filter
     stmt = select(Alarm).order_by(Alarm.created_at.desc(), Alarm.id.desc())
     if status_filter and status_filter in [s.value for s in AlarmStatus]:
         stmt = stmt.where(Alarm.status == AlarmStatus(status_filter))
     stmt = stmt.limit(limit)
     alarms = (await session.scalars(stmt)).all()
 
-    # Get counts (total and by status)
     total_count = await session.scalar(select(func.count(Alarm.id)))
     counts_rows = (
         await session.execute(select(Alarm.status, func.count(Alarm.id)).group_by(Alarm.status))
@@ -89,7 +87,6 @@ async def admin_dashboard(
         alarm_state = escape(alarm.status.value)
         alarm_id = str(alarm.id)
         alarm_short_id = escape(alarm_id[:8])
-        # Calculate time since creation
         created_at = alarm.created_at
         if created_at.tzinfo is None:
             created_at = created_at.replace(tzinfo=UTC)
@@ -154,7 +151,6 @@ async def admin_dashboard(
             "</tr>"
         )
 
-    # Build filter query string for links
     filter_qs = f"status={status_filter}&" if status_filter else ""
     if settings.simulation_enabled:
         simulation_panel = (

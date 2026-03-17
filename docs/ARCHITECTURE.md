@@ -1,6 +1,4 @@
-# Alarm Broker Architecture (PoC + Hardening)
-
-This repository implements a PoC alarm broker that receives silent alarms and fans out notifications across multiple channels while persisting an auditable lifecycle.
+# Alarm Broker Architecture
 
 ## Scope and intent
 
@@ -93,4 +91,4 @@ A request middleware adds:
 - Fail-closed admin auth when `ADMIN_API_KEY` is unset.
 - Token and IP validation on inbound trigger routes.
 - Escaped ACK HTML rendering.
-- Robust input parsing/validation for admin seed and escalation policy operations.
+- Input validation on admin seed and escalation policy operations (Pydantic + ORM only).

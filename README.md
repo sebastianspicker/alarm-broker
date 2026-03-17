@@ -187,13 +187,11 @@ stateDiagram-v2
 - `deploy/` – Docker Compose + example seed file
 
 Main docs:
-- `docs/INSTALL.md` - Installation guide
-- `docs/OPERATIONS.md` - Operations guide
-- `docs/TROUBLESHOOTING.md` - Troubleshooting guide
-- `docs/ARCHITECTURE.md`
-- `docs/DATA_MODEL.md`
-- `docs/INTEGRATIONS.md`
-- `docs/DEVELOPMENT.md`
+- [docs/SETUP.md](docs/SETUP.md) — installation, configuration reference, dev workflow
+- [docs/OPERATIONS.md](docs/OPERATIONS.md) — monitoring, backups, troubleshooting
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — data model, flows, lifecycle
+- [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) — Yealink/Zammad templates and connector notes
+- [docs/ROADMAP.md](docs/ROADMAP.md) — implementation backlog
 
 ## Additional Resources
 

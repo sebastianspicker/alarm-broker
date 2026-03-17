@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import enum
 import uuid
 from datetime import datetime
 from typing import Any
@@ -13,7 +14,7 @@ from sqlalchemy.types import Uuid
 from alarm_broker.db.base import Base
 
 
-class AlarmStatus(__import__("enum").StrEnum):
+class AlarmStatus(enum.StrEnum):
     TRIGGERED = "triggered"
     ACKNOWLEDGED = "acknowledged"
     RESOLVED = "resolved"

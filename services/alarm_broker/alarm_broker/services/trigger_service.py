@@ -1,8 +1,4 @@
-"""Trigger service for handling alarm triggers.
-
-This service encapsulates the logic for processing alarm triggers,
-including idempotency, rate limiting, device validation, and alarm creation.
-"""
+"""Alarm trigger processing: idempotency, rate limiting, device validation, alarm creation."""
 
 from __future__ import annotations
 
@@ -11,7 +7,6 @@ import logging
 import secrets
 import uuid
 from datetime import UTC, datetime
-from typing import Any
 
 from arq.connections import ArqRedis
 from sqlalchemy import select
@@ -176,7 +171,6 @@ class TriggerService:
             ok = await self._redis.set(idem_key, str(reserved_id), ex=30, nx=True)
             if ok:
                 return reserved_id
-            # Check if there's an existing alarm ID we can use
             existing = await self._redis.get(idem_key)
             if existing:
                 try:
@@ -362,81 +356,6 @@ class TriggerService:
             )
         return alarm_id
 
-    async def _check_rate_limit(self, token: str) -> bool:
-        """Check if request is within rate limits.
-
-        Args:
-            token: Device token
-
-        Returns:
-            True if within limits, False if exceeded
-        """
-        return await self.check_rate_limit(token)
-
-    async def _enrich_trigger_data(
-        self,
-        token: str,
-    ) -> tuple[Device | None, str | None]:
-        """Enrich trigger data by validating and fetching device info.
-
-        Args:
-            token: Device token
-
-        Returns:
-            Tuple of (device, error_message)
-        """
-        return await self.validate_device(token)
-
-    async def _evaluate_policies(
-        self,
-        device: Device,
-    ) -> dict[str, Any]:
-        """Evaluate escalation policies for the device.
-
-        Determines notification targets based on escalation policies.
-
-        Args:
-            device: Validated device
-
-        Returns:
-            Dictionary with policy evaluation results
-        """
-        # TODO: Implement policy evaluation logic
-        # For now, return default configuration
-        return {
-            "use_default_severity": True,
-            "severity": constants.DEFAULT_SEVERITY,
-            "notification_targets": [],
-        }
-
-    async def _create_alarm(
-        self,
-        device: Device,
-        alarm_id: uuid.UUID,
-        client_ip: str,
-        user_agent: str,
-        event: str | None = None,
-    ) -> Alarm:
-        """Create alarm object instance.
-
-        Args:
-            device: Validated device
-            alarm_id: Pre-reserved alarm ID
-            client_ip: Client IP address
-            user_agent: User agent string
-            event: Event type (optional)
-
-        Returns:
-            Created alarm instance
-        """
-        return await self.create_alarm(
-            device=device,
-            alarm_id=alarm_id,
-            client_ip=client_ip,
-            user_agent=user_agent,
-            event=event,
-        )
-
     async def _send_notifications(self, alarm: Alarm) -> bool:
         """Send notifications for the created alarm.
 
@@ -489,7 +408,7 @@ class TriggerService:
             return TriggerResult.error(500, "Idempotency failure")
 
         # Step 4: Check rate limit
-        if not await self._check_rate_limit(token):
+        if not await self.check_rate_limit(token):
             await self.clear_idempotency(token)
             logger.warning(
                 "rate_limit_exceeded",
@@ -500,16 +419,20 @@ class TriggerService:
             )
             return TriggerResult.error(429, "Rate limit exceeded")
 
-        # Step 5: Enrich trigger data (validate device)
-        device, device_error = await self._enrich_trigger_data(token)
+        # Step 5: Validate device
+        device, device_error = await self.validate_device(token)
         if device_error:
             await self.clear_idempotency(token)
             status_code = 404 if device_error == "Unknown token" else 409
             return TriggerResult.error(status_code, device_error)
 
-        # Step 6-8: Evaluate policies, create alarm, send notifications
-        await self._evaluate_policies(device)
-        alarm = await self._create_alarm(device, alarm_id, client_ip, user_agent, event)
+        alarm = await self.create_alarm(
+            device=device,
+            alarm_id=alarm_id,
+            client_ip=client_ip,
+            user_agent=user_agent,
+            event=event,
+        )
         await self._send_notifications(alarm)
 
         logger.info(

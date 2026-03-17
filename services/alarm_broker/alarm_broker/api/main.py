@@ -69,12 +69,20 @@ def _lifespan(
     return lifespan
 
 
+def _safe_log_path(path: str) -> str:
+    """Return a log-safe route path with sensitive path segments masked."""
+    if path.startswith("/a/"):
+        return "/a/{ack_token}"
+    return path
+
+
 def _install_observability_middleware(app: FastAPI) -> None:
     @app.middleware("http")
     async def request_middleware(request: Request, call_next):
         start = time.perf_counter()
         request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
         request.state.request_id = request_id
+        log_route = _safe_log_path(request.url.path)
 
         try:
             response = await call_next(request)
@@ -84,7 +92,7 @@ def _install_observability_middleware(app: FastAPI) -> None:
                 "request_failed",
                 extra={
                     "request_id": request_id,
-                    "route": request.url.path,
+                    "route": log_route,
                     "status_code": 500,
                     "latency_ms": duration_ms,
                     "alarm_id": getattr(request.state, "alarm_id", None),
@@ -92,7 +100,7 @@ def _install_observability_middleware(app: FastAPI) -> None:
             )
             record_http_request(
                 method=request.method,
-                route=request.url.path,
+                route=log_route,
                 status_code=500,
                 duration_ms=duration_ms,
             )
@@ -105,7 +113,7 @@ def _install_observability_middleware(app: FastAPI) -> None:
             "request_completed",
             extra={
                 "request_id": request_id,
-                "route": request.url.path,
+                "route": log_route,
                 "status_code": response.status_code,
                 "latency_ms": duration_ms,
                 "alarm_id": getattr(request.state, "alarm_id", None),
@@ -113,7 +121,7 @@ def _install_observability_middleware(app: FastAPI) -> None:
         )
         record_http_request(
             method=request.method,
-            route=request.url.path,
+            route=log_route,
             status_code=response.status_code,
             duration_ms=duration_ms,
         )

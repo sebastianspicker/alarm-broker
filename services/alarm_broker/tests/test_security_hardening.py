@@ -16,7 +16,6 @@ from alarm_broker.settings import Settings
 pytestmark = [pytest.mark.security]
 
 
-@pytest.mark.asyncio
 async def test_untrusted_x_forwarded_for_does_not_bypass_ip_allowlist(
     engine, seeded_db, fake_redis, settings
 ):
@@ -40,7 +39,6 @@ async def test_untrusted_x_forwarded_for_does_not_bypass_ip_allowlist(
     assert resp.status_code == 403
 
 
-@pytest.mark.asyncio
 async def test_trusted_proxy_allows_forwarded_client_ip(engine, seeded_db, fake_redis, settings):
     payload = settings.model_dump()
     payload.update(
@@ -67,7 +65,6 @@ async def test_trusted_proxy_allows_forwarded_client_ip(engine, seeded_db, fake_
     assert resp.status_code == 200
 
 
-@pytest.mark.asyncio
 async def test_ack_page_escapes_untrusted_html(
     engine, sessionmaker, seeded_db, fake_redis, settings
 ):
@@ -107,7 +104,6 @@ async def test_ack_page_escapes_untrusted_html(
     assert "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;" in resp.text
 
 
-@pytest.mark.asyncio
 async def test_ack_page_sets_no_store_and_security_headers(
     engine, sessionmaker, seeded_db, fake_redis, settings
 ):
@@ -136,7 +132,6 @@ async def test_ack_page_sets_no_store_and_security_headers(
     assert resp.headers.get("Referrer-Policy") == "no-referrer"
 
 
-@pytest.mark.asyncio
 async def test_ack_form_rejects_oversized_note(
     engine, sessionmaker, seeded_db, fake_redis, settings
 ):
@@ -170,7 +165,6 @@ def test_rate_limit_key_does_not_include_raw_token() -> None:
     assert "TOPSECRET_DEVICE_TOKEN" not in key
 
 
-@pytest.mark.asyncio
 async def test_docs_and_openapi_disabled_by_default(engine, seeded_db, fake_redis):
     app = create_app(
         settings=Settings(
@@ -200,7 +194,6 @@ def test_default_admin_api_key_is_empty() -> None:
     assert Settings().admin_api_key == ""
 
 
-@pytest.mark.asyncio
 async def test_invalid_alarm_id_rejected_with_422(engine, seeded_db, fake_redis) -> None:
     app = create_app(
         settings=Settings(
@@ -233,7 +226,6 @@ async def test_invalid_alarm_id_rejected_with_422(engine, seeded_db, fake_redis)
     assert post_resp.status_code == 422
 
 
-@pytest.mark.asyncio
 async def test_invalid_allowlist_config_fails_closed_without_500(
     engine, seeded_db, fake_redis, settings
 ):
@@ -253,7 +245,6 @@ async def test_invalid_allowlist_config_fails_closed_without_500(
     assert resp.status_code == 403
 
 
-@pytest.mark.asyncio
 async def test_invalid_trusted_proxy_config_is_ignored_without_500(
     engine, seeded_db, fake_redis, settings
 ):
@@ -283,7 +274,6 @@ def test_env_example_does_not_ship_static_admin_secret() -> None:
     assert "ADMIN_API_KEY=dev-admin-key" not in text
 
 
-@pytest.mark.asyncio
 async def test_admin_seed_invalid_json_returns_400(engine, seeded_db, fake_redis) -> None:
     app = create_app(
         settings=Settings(
@@ -314,7 +304,6 @@ async def test_admin_seed_invalid_json_returns_400(engine, seeded_db, fake_redis
     assert resp.status_code == 400
 
 
-@pytest.mark.asyncio
 async def test_admin_seed_invalid_yaml_returns_400(engine, seeded_db, fake_redis) -> None:
     app = create_app(
         settings=Settings(
@@ -345,7 +334,6 @@ async def test_admin_seed_invalid_yaml_returns_400(engine, seeded_db, fake_redis
     assert resp.status_code == 400
 
 
-@pytest.mark.asyncio
 async def test_admin_seed_accepts_application_yaml_content_type(
     engine, seeded_db, fake_redis
 ) -> None:
@@ -378,7 +366,6 @@ async def test_admin_seed_accepts_application_yaml_content_type(
     assert resp.status_code == 200
 
 
-@pytest.mark.asyncio
 async def test_policy_rejects_missing_target_references(engine, seeded_db, fake_redis) -> None:
     app = create_app(
         settings=Settings(
@@ -436,7 +423,6 @@ def test_ip_allowlist_ipv6_host_entry_matches_only_exact_host() -> None:
     assert not ip_allowed("2001:db8::2", "2001:db8::1")
 
 
-@pytest.mark.asyncio
 async def test_policy_duplicate_step_target_rejected(engine, seeded_db, fake_redis) -> None:
     app = create_app(
         settings=Settings(
@@ -479,7 +465,6 @@ async def test_policy_duplicate_step_target_rejected(engine, seeded_db, fake_red
     assert resp.status_code == 400
 
 
-@pytest.mark.asyncio
 async def test_admin_seed_invalid_structure_returns_400(engine, seeded_db, fake_redis) -> None:
     app = create_app(
         settings=Settings(
@@ -510,7 +495,6 @@ async def test_admin_seed_invalid_structure_returns_400(engine, seeded_db, fake_
     assert resp.status_code == 400
 
 
-@pytest.mark.asyncio
 async def test_seed_env_false_expands_to_boolean_false(sessionmaker, settings, monkeypatch) -> None:
     monkeypatch.setenv("TEST_ACTIVE", "false")
     raw = {

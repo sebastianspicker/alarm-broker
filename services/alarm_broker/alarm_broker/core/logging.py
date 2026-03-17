@@ -1,11 +1,4 @@
-"""Logging configuration for the alarm broker.
-
-This module provides structured logging configuration with support for:
-- JSON formatted logs for production
-- Human-readable logs for development
-- Correlation ID propagation
-- Request context enrichment
-"""
+"""JSON and human-readable log formatters plus configure_logging() for the alarm broker."""
 
 from __future__ import annotations
 
@@ -52,10 +45,8 @@ class StructuredFormatter(logging.Formatter):
         if self.include_level:
             log_data["level"] = record.levelname
 
-        # Add logger name
         log_data["logger"] = record.name
 
-        # Add extra fields
         if hasattr(record, "request_id"):
             log_data["request_id"] = record.request_id
 
@@ -67,11 +58,9 @@ class StructuredFormatter(logging.Formatter):
             if isinstance(extra, dict):
                 log_data.update(extra)
 
-        # Add exception info if present
         if record.exc_info:
             log_data["exception"] = self.formatException(record.exc_info)
 
-        # Add location info
         log_data["location"] = f"{record.filename}:{record.lineno}"
 
         return json.dumps(log_data)
@@ -105,10 +94,8 @@ class HumanReadableFormatter(logging.Formatter):
         color = self.COLORS.get(record.levelname, "")
         level = f"{color}{record.levelname:8}{self.RESET}"
 
-        # Base message
         parts = [f"[{timestamp}] {level} {record.name}: {record.getMessage()}"]
 
-        # Add extra fields
         extra_parts = []
         if hasattr(record, "request_id"):
             extra_parts.append(f"request_id={record.request_id}")
@@ -121,7 +108,6 @@ class HumanReadableFormatter(logging.Formatter):
         if extra_parts:
             parts.append("  " + " ".join(extra_parts))
 
-        # Add exception if present
         if record.exc_info:
             parts.append(self.formatException(record.exc_info))
 
@@ -140,19 +126,15 @@ def configure_logging(
         json_format: Use JSON structured logging
         loggers: Additional loggers to configure
     """
-    # Get root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
 
-    # Remove existing handlers
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
 
-    # Create handler
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(level)
 
-    # Select formatter
     if json_format:
         formatter = StructuredFormatter()
     else:
@@ -161,7 +143,6 @@ def configure_logging(
     handler.setFormatter(formatter)
     root_logger.addHandler(handler)
 
-    # Configure specific loggers
     loggers_to_configure = ["alarm_broker", "uvicorn", "sqlalchemy"]
     if loggers:
         loggers_to_configure.extend(loggers)
