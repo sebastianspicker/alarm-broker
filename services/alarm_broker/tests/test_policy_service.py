@@ -205,6 +205,25 @@ async def test_duplicate_target_ids_in_step_raises_validation_error(
             await apply_escalation_policy(session, body)
 
 
+async def test_duplicate_step_target_pair_across_steps_raises_validation_error(
+    sessionmaker: async_sessionmaker, engine
+):
+    """Same step_no + target_id appearing in two separate StepIn entries raises ValidationError."""
+    body = EscalationPolicyIn(
+        policy_id="pol-cross-dup",
+        name="Cross-Step Dup",
+        targets=[_make_target(id="tgt-x")],
+        steps=[
+            StepIn(step_no=1, after_seconds=60, target_ids=["tgt-x"]),
+            StepIn(step_no=1, after_seconds=120, target_ids=["tgt-x"]),
+        ],
+    )
+
+    async with sessionmaker() as session:
+        with pytest.raises(ValidationError, match="Duplicate step/target pair"):
+            await apply_escalation_policy(session, body)
+
+
 # ── Validation: missing target references ────────────────────────────
 
 

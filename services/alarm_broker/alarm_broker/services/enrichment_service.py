@@ -9,7 +9,7 @@ from alarm_broker.types import EnrichedAlarmContext
 async def enrich_alarm_context(session: AsyncSession, alarm: Alarm) -> EnrichedAlarmContext:
     person_name: str | None = alarm.person_id
     room_label: str | None = alarm.room_id
-    site_name: str | None = None
+    site_name: str | None = alarm.site_id
 
     if alarm.person_id:
         person = await session.get(Person, alarm.person_id)
@@ -24,7 +24,15 @@ async def enrich_alarm_context(session: AsyncSession, alarm: Alarm) -> EnrichedA
                 if site:
                     site_name = site.name
                 else:
-                    site_name = None
+                    site_name = room.site_id
+        elif alarm.site_id:
+            site = await session.get(Site, alarm.site_id)
+            if site:
+                site_name = site.name
+    elif alarm.site_id:
+        site = await session.get(Site, alarm.site_id)
+        if site:
+            site_name = site.name
 
     return EnrichedAlarmContext(
         person_name=person_name,

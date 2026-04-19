@@ -15,7 +15,7 @@
 - **Escalation engine** -- Configurable escalation schedule with delayed Redis-backed jobs
 - **Admin dashboard** -- Real-time alarm overview with search, quick-ack, and detail modal (`/admin`)
 - **Full audit trail** -- Every alarm state change and notification is persisted in PostgreSQL
-- **Prometheus metrics** -- `/metrics` endpoint for monitoring and alerting
+- **Prometheus metrics** -- Admin-protected `/metrics` endpoint for monitoring and alerting
 - **Idempotency & rate limiting** -- Deduplicates rapid triggers; prevents abuse
 - **Simulation mode** -- Demo mode with mock connectors for testing without live integrations
 
@@ -225,6 +225,10 @@ curl -sS "http://localhost:8080/readyz" | jq .
 
 Open the **admin dashboard**: <http://localhost:8080/admin/login>
 
+Local development note: on plain `http://localhost:8080`, the admin session cookie and ACK CSRF cookie are intentionally emitted without the `Secure` flag so browser flows work locally. On HTTPS, or behind a trusted proxy forwarding `X-Forwarded-Proto: https`, those cookies are marked `Secure`.
+
+Metrics note: `/metrics` requires the `X-Admin-Key` header. For Prometheus, expose it through a trusted reverse proxy or scrape via a sidecar that injects the header.
+
 To test the **ACK page**, fetch alarm details with the admin key, then open `/a/<ack_token>` in a browser:
 
 ```bash
@@ -260,12 +264,14 @@ Notes:
 
 ```bash
 make lint       # ruff format + check
-make test       # pytest with coverage (197 tests, 92% coverage, threshold: 90%)
+make test       # pytest with coverage (threshold: 93%)
 make audit      # ruff + bandit + pip-audit
 ```
 
 **Quality gates** (all enforced in CI):
 - ruff format + lint
-- mypy strict type checking (0 errors)
+- mypy strict type checking
 - bandit security scanning
-- pytest with 90% coverage threshold
+- pytest with 93% coverage threshold
+- wheel packaging smoke import
+- PostgreSQL + Alembic smoke path
