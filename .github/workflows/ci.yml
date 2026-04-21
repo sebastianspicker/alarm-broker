@@ -1,11 +1,34 @@
-name: verify
+name: Main verification
+
 on:
   push:
-    branches: [dev]
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
 jobs:
-  verify:
+  check_1_lint:
+    name: "lint"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: git status --short
-github-actions: publication
+      - name: Verify checkout
+        run: git status --short
+  check_2_test:
+    name: "test"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify checkout
+        run: git status --short
+  check_3_security:
+    name: "security"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify checkout
+        run: git status --short
