@@ -46,7 +46,14 @@ def _lifespan(
         if injected_engine is not None:
             engine = injected_engine
         else:
-            engine = create_async_engine_from_url(resolved_settings.database_url)
+            engine = create_async_engine_from_url(
+                resolved_settings.database_url,
+                pool_size=resolved_settings.db_pool_size,
+                max_overflow=resolved_settings.db_max_overflow,
+                pool_timeout=resolved_settings.db_pool_timeout,
+                pool_recycle=resolved_settings.db_pool_recycle,
+                slow_query_log_ms=resolved_settings.slow_query_log_ms,
+            )
         app.state.engine = engine
         app.state.sessionmaker = create_sessionmaker(engine)
 
@@ -80,7 +87,9 @@ def _install_observability_middleware(app: FastAPI) -> None:
     @app.middleware("http")
     async def request_middleware(request: Request, call_next):
         start = time.perf_counter()
-        request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+        raw_id = request.headers.get("x-request-id", "")
+        # Sanitize: accept only the first 128 printable ASCII chars; generate if empty/invalid.
+        request_id = raw_id[:128] if raw_id and raw_id.isprintable() else str(uuid.uuid4())
         request.state.request_id = request_id
         log_route = _safe_log_path(request.url.path)
 

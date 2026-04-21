@@ -1,10 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import html as _html
 import secrets
-import time
 from datetime import UTC, datetime
-from pathlib import Path
 from string import Template
 
 from fastapi import APIRouter, Cookie, Depends, Form, HTTPException, Query, Request, status
@@ -12,7 +11,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from alarm_broker.api.deps import get_app_settings, get_session
+from alarm_broker.api.deps import get_app_settings, get_redis, get_session, is_secure_request
+from alarm_broker.api.template_loader import load_template
 from alarm_broker.db.models import Alarm, AlarmStatus
 from alarm_broker.settings import Settings
 
@@ -24,48 +24,21 @@ def escape(s: str) -> str:
 
 router = APIRouter()
 
-# Load external template
-_TEMPLATE_PATH = Path(__file__).parent.parent / "templates" / "admin.html"
-
-# Server-side session store: token -> (admin_key, expiry_timestamp)
-_SESSION_STORE: dict[str, tuple[str, float]] = {}
 _SESSION_TTL_SECONDS = 3600  # 1 hour
-_SESSION_STORE_MAX_ENTRIES = 1000
 
 
-def _load_template() -> Template:
-    """Load admin UI template with fallback for testing environments."""
-    try:
-        return Template(_TEMPLATE_PATH.read_text())
-    except FileNotFoundError:
-        # Fallback for testing - return a minimal template
-        return Template("""
-<!DOCTYPE html>
-<html>
-<head><title>Admin</title></head>
-<body><h1>Alarm Admin</h1></body>
-</html>
-""")
+_TEMPLATE: Template = load_template("admin.html")
 
 
-_TEMPLATE = _load_template()
+def _session_key(token: str) -> str:
+    return f"admin_session:{token}"
 
 
-def _purge_expired_sessions() -> None:
-    """Remove expired entries from the session store and enforce max-size cap."""
-    now = time.time()
-    expired = [tok for tok, (_, exp) in _SESSION_STORE.items() if exp <= now]
-    for tok in expired:
-        _SESSION_STORE.pop(tok, None)
-
-    # Enforce max-size cap by evicting oldest sessions first
-    if len(_SESSION_STORE) > _SESSION_STORE_MAX_ENTRIES:
-        sorted_tokens = sorted(_SESSION_STORE, key=lambda t: _SESSION_STORE[t][1])
-        for tok in sorted_tokens[: len(_SESSION_STORE) - _SESSION_STORE_MAX_ENTRIES]:
-            _SESSION_STORE.pop(tok, None)
+def _admin_key_marker(settings: Settings) -> str:
+    return hashlib.sha256(settings.admin_api_key.encode()).hexdigest()
 
 
-def _validate_session(settings: Settings, session_token: str | None) -> None:
+async def _validate_session(settings: Settings, redis, session_token: str | None) -> None:
     """Validate that the session cookie maps to a valid admin key."""
     if not settings.admin_api_key:
         raise HTTPException(
@@ -77,21 +50,20 @@ def _validate_session(settings: Settings, session_token: str | None) -> None:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated. Please log in at /admin/login.",
         )
-    _purge_expired_sessions()
-    entry = _SESSION_STORE.get(session_token)
-    if entry is None or entry[1] <= time.time():
-        _SESSION_STORE.pop(session_token, None)
+    stored_marker = await redis.get(_session_key(session_token))
+    if stored_marker is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Session expired. Please log in again at /admin/login.",
         )
-    stored_key = entry[0]
-    if not secrets.compare_digest(stored_key, settings.admin_api_key):
-        _SESSION_STORE.pop(session_token, None)
+    current_marker = _admin_key_marker(settings)
+    if not secrets.compare_digest(stored_marker, current_marker):
+        await redis.delete(_session_key(session_token))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid session. Please log in again at /admin/login.",
         )
+    await redis.expire(_session_key(session_token), _SESSION_TTL_SECONDS)
 
 
 @router.get("/admin/login", response_class=HTMLResponse)
@@ -137,6 +109,7 @@ button:focus-visible{outline:2px solid #38bdf8;outline-offset:2px}
 
 @router.post("/admin/login")
 async def admin_login_submit(
+    request: Request,
     admin_key: str = Form(...),
     settings: Settings = Depends(get_app_settings),
 ) -> RedirectResponse:
@@ -152,16 +125,20 @@ async def admin_login_submit(
             detail="Invalid admin key. Please check your credentials and try again.",
         )
 
-    _purge_expired_sessions()
     token = secrets.token_urlsafe(32)
-    _SESSION_STORE[token] = (settings.admin_api_key, time.time() + _SESSION_TTL_SECONDS)
+    redis = get_redis(request)
+    await redis.set(
+        _session_key(token),
+        _admin_key_marker(settings),
+        ex=_SESSION_TTL_SECONDS,
+    )
 
     response = RedirectResponse(url="/admin", status_code=status.HTTP_303_SEE_OTHER)
     response.set_cookie(
         key="admin_session",
         value=token,
         httponly=True,
-        secure=True,
+        secure=is_secure_request(request, settings),
         samesite="strict",
         max_age=_SESSION_TTL_SECONDS,
     )
@@ -178,7 +155,8 @@ async def admin_dashboard(
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_app_settings),
 ) -> HTMLResponse:
-    _validate_session(settings, admin_session)
+    redis = get_redis(request)
+    await _validate_session(settings, redis, admin_session)
 
     stmt = (
         select(Alarm)

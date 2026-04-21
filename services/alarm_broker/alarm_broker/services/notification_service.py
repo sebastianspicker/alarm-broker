@@ -88,7 +88,7 @@ class NotificationService:
         enriched: EnrichedAlarmContext,
         *,
         step_no: int,
-        ack_url: str,
+        ack_url: str | None,
         policy_id: str = "default",
     ) -> None:
         """Build payload, fetch escalation targets, dispatch to each enabled channel."""
@@ -111,7 +111,7 @@ class NotificationService:
         alarm: Alarm,
         enriched: EnrichedAlarmContext,
         step_no: int,
-        ack_url: str,
+        ack_url: str | None,
     ) -> NotificationPayload:
         """Build the notification payload with message content and metadata.
 
@@ -471,7 +471,7 @@ class NotificationService:
         session: AsyncSession,
         alarm: Alarm,
         enriched: EnrichedAlarmContext,
-        ack_url: str,
+        ack_url: str | None,
         settings: Any,
     ) -> int | None:
         """Create a Zammad ticket for the alarm.

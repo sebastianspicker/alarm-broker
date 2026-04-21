@@ -43,6 +43,9 @@ dev = [
 where = ["."]
 include = ["alarm_broker*"]
 
+[tool.setuptools.package-data]
+"alarm_broker.api" = ["templates/*.html"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
@@ -58,8 +61,7 @@ omit = ["*/tests/*", "*/alembic/*", "*/core/logging.py", "*/worker/settings.py",
 
 [tool.coverage.report]
 show_missing = true
-# TODO: restore fail_under=90 once coverage is back above 90%
-fail_under = 89
+fail_under = 93
 exclude_lines = [
   "pragma: no cover",
   "if TYPE_CHECKING:",
@@ -79,5 +81,10 @@ asyncio_default_fixture_loop_scope = "function"
 markers = [
   "unit: Fast isolated tests without external integrations.",
   "integration: End-to-end tests across API, DB and queue boundaries.",
+  "postgres: Tests that require a real PostgreSQL database.",
   "security: Security regression and hardening tests.",
+]
+filterwarnings = [
+  "ignore:ADMIN_API_KEY is not set.*:UserWarning",
+  "ignore:YELK_IP_ALLOWLIST is not set.*:UserWarning",
 ]

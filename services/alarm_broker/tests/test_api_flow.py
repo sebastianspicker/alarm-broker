@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import uuid
 
 import pytest
@@ -9,6 +8,11 @@ from sqlalchemy import select
 
 from alarm_broker.api.main import create_app
 from alarm_broker.db.models import Alarm, AlarmStatus
+
+try:
+    from tests.helpers import ack_with_csrf
+except ModuleNotFoundError:
+    from helpers import ack_with_csrf
 
 pytestmark = [pytest.mark.integration]
 
@@ -59,21 +63,7 @@ async def test_yealink_idempotent_and_ack(
             assert r3.status_code == 200
             assert "Alarm übernehmen" in r3.text
 
-            # Extract CSRF token from hidden form field
-            match = re.search(r'name="csrf_token"\s+value="([^"]+)"', r3.text)
-            csrf_value = match.group(1) if match else ""
-
-            # Manually set the csrf_token cookie because the server sets it
-            # with Secure=True but tests use http:// transport.
-            set_cookie = r3.headers.get("set-cookie", "")
-            if "csrf_token=" in set_cookie:
-                token = set_cookie.split("csrf_token=")[1].split(";")[0]
-                client.cookies.set("csrf_token", token)
-
-            r4 = await client.post(
-                f"/a/{alarm.ack_token}",
-                data={"acked_by": "Tester", "note": "On my way", "csrf_token": csrf_value},
-            )
+            r4 = await ack_with_csrf(client, alarm.ack_token, acked_by="Tester", note="On my way")
             assert r4.status_code == 200
 
     async with sessionmaker() as session:

@@ -19,7 +19,7 @@ curl -sS http://localhost:8080/readyz
 
 ### Metrics
 
-The application exposes Prometheus-compatible metrics at `/metrics`.
+The application exposes Prometheus-compatible metrics at `/metrics`, but the endpoint is protected by the admin API key.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
@@ -28,6 +28,11 @@ The application exposes Prometheus-compatible metrics at `/metrics`.
 | `alarm_broker_alarms_by_status` | Gauge | status | Alarm count per lifecycle state |
 | `alarm_broker_notifications_total` | Counter | channel, result | Notification attempts by channel and outcome |
 | `alarm_broker_events_total` | Counter | event | Internal events (webhook_delivery_ok, etc.) |
+
+Scrape guidance:
+
+- Direct local check: `curl -sS http://localhost:8080/metrics -H 'X-Admin-Key: ...'`
+- Production scraping: terminate auth at a trusted reverse proxy or scrape through a sidecar that injects `X-Admin-Key`
 
 ## Simulation Mode Operations
 
@@ -118,7 +123,7 @@ cp /data/dump.rdb backup/dump_$(date +%Y%m%d).rdb
 
 ### Database Connection Pool
 
-Pool settings are configured in `db/engine.py`. The defaults (pool_size=5, max_overflow=10) are appropriate for low-traffic deployments. To change them, edit `create_async_engine_from_url` or pass engine kwargs there — there are no env vars for this today.
+Pool settings are configured via environment variables (`DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT`, `DB_POOL_RECYCLE`) and wired into `create_async_engine` in `db/engine.py`. The defaults (pool_size=5, max_overflow=10) are appropriate for low-traffic deployments. See `.env.example` for all pool tuning options.
 
 ### Worker Concurrency
 
@@ -182,7 +187,7 @@ redis-cli INFO clients
 
 ```bash
 # Monitor webhook delivery events
-curl -sS http://localhost:8080/metrics | grep alarm_broker_events_total
+curl -sS http://localhost:8080/metrics -H "X-Admin-Key: change-me-admin-key" | grep alarm_broker_events_total
 ```
 
 ### Debug Mode

@@ -69,18 +69,24 @@ async def yealink_alarm(
         client_ip=client_ip,
         user_agent=request.headers.get("user-agent", ""),
         event=request.query_params.get("event"),
+        request_id=getattr(request.state, "request_id", None),
     )
 
     if not result.success:
         raise HTTPException(
             status_code=result.error_code or 500,
-            detail=result.error_message or "Trigger processing failed. Check server logs for details.",
+            detail=(
+                result.error_message or "Trigger processing failed. Check server logs for details."
+            ),
         )
 
     if result.alarm_id is None or result.status is None:
         raise HTTPException(
             status_code=500,
-            detail="Internal error: alarm was created but response data is incomplete. Check server logs.",
+            detail=(
+                "Internal error: alarm was created but response data is incomplete. "
+                "Check server logs."
+            ),
         )
 
     # Store alarm_id in request state for logging

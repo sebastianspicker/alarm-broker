@@ -53,12 +53,33 @@ async def enqueue_alarm_acked_event(
         return EventResult(success=False, error=str(exc))
 
 
+async def enqueue_alarm_created_event(
+    redis: Any,
+    *,
+    alarm_id: uuid.UUID,
+    logger: logging.Logger,
+) -> EventResult:
+    """Enqueue an alarm created event.
+
+    Convenience wrapper around EventPublisher with error handling and metrics.
+    """
+    try:
+        publisher = EventPublisher(redis)
+        await publisher.publish_alarm_created(alarm_id=str(alarm_id))
+        record_event("alarm_created_enqueued")
+        return EventResult(success=True)
+    except Exception as exc:
+        logger.exception("enqueue alarm_created failed", extra={"alarm_id": str(alarm_id)})
+        return EventResult(success=False, error=str(exc))
+
+
 async def enqueue_alarm_state_changed_event(
     redis: Any,
     *,
     alarm_id: uuid.UUID,
     state: str,
     logger: logging.Logger,
+    old_state: str = "unknown",
 ) -> EventResult:
     """Enqueue an alarm state changed event.
 
@@ -77,7 +98,7 @@ async def enqueue_alarm_state_changed_event(
         publisher = EventPublisher(redis)
         await publisher.publish_alarm_state_changed(
             alarm_id=str(alarm_id),
-            old_state="unknown",
+            old_state=old_state,
             new_state=state,
         )
         record_event("alarm_state_changed_enqueued")

@@ -21,6 +21,7 @@ from alarm_broker.worker.tasks import (
     alarm_state_changed,
     escalate,
     process_alarm_event,
+    recover_incomplete_alarm_events,
 )
 
 try:
@@ -103,7 +104,9 @@ async def test_build_webhook_payload(sessionmaker, seeded_db):
 # ---------------------------------------------------------------------------
 
 
-async def test_alarm_state_changed_posts_webhook_with_hmac(sessionmaker, seeded_db, settings):
+async def test_alarm_state_changed_posts_webhook_with_hmac(
+    sessionmaker, seeded_db, settings, monkeypatch
+):
     alarm_id = uuid.uuid4()
     now = datetime.now(UTC)
 
@@ -118,6 +121,11 @@ async def test_alarm_state_changed_posts_webhook_with_hmac(sessionmaker, seeded_
 
     http = httpx.AsyncClient()
     ctx = _make_ctx(sessionmaker, settings, http)
+
+    async def allow_webhook(_url: str) -> None:
+        return None
+
+    monkeypatch.setattr("alarm_broker.worker.tasks.validate_url_not_internal", allow_webhook)
 
     with respx.mock(assert_all_called=True) as mock_router:
 
@@ -140,7 +148,9 @@ async def test_alarm_state_changed_posts_webhook_with_hmac(sessionmaker, seeded_
 # ---------------------------------------------------------------------------
 
 
-async def test_process_alarm_event_dispatches_state_changed(sessionmaker, seeded_db, settings):
+async def test_process_alarm_event_dispatches_state_changed(
+    sessionmaker, seeded_db, settings, monkeypatch
+):
     """process_alarm_event dispatches alarm.state_changed to alarm_state_changed."""
     alarm_id = uuid.uuid4()
 
@@ -155,6 +165,11 @@ async def test_process_alarm_event_dispatches_state_changed(sessionmaker, seeded
 
     http = httpx.AsyncClient()
     ctx = _make_ctx(sessionmaker, settings, http)
+
+    async def allow_webhook(_url: str) -> None:
+        return None
+
+    monkeypatch.setattr("alarm_broker.worker.tasks.validate_url_not_internal", allow_webhook)
 
     with respx.mock(assert_all_called=True) as mock_router:
         route = mock_router.post("https://hooks.example.test/event").respond(200, json={"ok": True})
@@ -190,6 +205,45 @@ async def test_process_alarm_event_missing_payload(sessionmaker, seeded_db, sett
     """Invalid payloads (missing event_type) return early without raising."""
     ctx = _make_ctx(sessionmaker, settings)
     await process_alarm_event(ctx, {})
+
+
+async def test_recover_incomplete_alarm_events_enqueues_missing_jobs(
+    sessionmaker, seeded_db, settings
+):
+    alarm_id = uuid.uuid4()
+
+    async with sessionmaker() as session:
+        session.add(
+            _make_alarm(
+                alarm_id,
+                meta={
+                    "event_delivery": {
+                        "alarm_created_enqueued": False,
+                        "alarm_state_changed_enqueued": False,
+                        "last_error": "queue unavailable",
+                        "last_attempt_at": None,
+                    }
+                },
+            )
+        )
+        await session.commit()
+
+    ctx = _make_ctx(sessionmaker, settings)
+
+    await recover_incomplete_alarm_events(ctx)
+
+    assert [args[0]["event_type"] for _name, args in ctx["redis"].jobs] == [
+        "alarm.created",
+        "alarm.state_changed",
+    ]
+
+    async with sessionmaker() as session:
+        alarm = await session.get(Alarm, alarm_id)
+        assert alarm is not None
+        delivery = alarm.meta["event_delivery"]
+        assert delivery["alarm_created_enqueued"] is True
+        assert delivery["alarm_state_changed_enqueued"] is True
+        assert delivery["last_error"] is None
 
 
 # ---------------------------------------------------------------------------

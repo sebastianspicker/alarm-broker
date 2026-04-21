@@ -1,4 +1,4 @@
-.PHONY: test lint lint-fix format format-check audit clean install dev demo-prepare demo-screens
+.PHONY: test test-postgres-smoke package-check lint lint-fix format format-check audit clean install dev demo-prepare demo-screens
 
 # Development
 install:
@@ -10,6 +10,12 @@ dev: install
 # Testing
 test:
 	cd services/alarm_broker && python -m pytest -q --cov=alarm_broker --cov-report=term-missing
+
+test-postgres-smoke:
+	cd services/alarm_broker && alembic upgrade head && pytest -q tests/test_postgres_smoke.py --tb=short
+
+package-check:
+	cd services/alarm_broker && python -m build --wheel
 
 test-verbose:
 	cd services/alarm_broker && python -m pytest -v --cov=alarm_broker --cov-report=term-missing

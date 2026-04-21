@@ -120,18 +120,45 @@
 - 9 new tests targeting worker/tasks.py (58%→89%): alarm_created flow, escalate, alarm_acked.
 - Coverage: 89% → 92%. Threshold raised to 90%.
 
+### Phase 22: Full Improvement Sweep (Round 6)
+
+#### Coverage push (89.72% → 93.48%)
+- Added `test_core_utils.py` error-class tests: covers all constructors and `to_dict()` variants.
+- Created `test_event_service.py`: 9 tests for all three enqueue wrappers (success + exception branches).
+- Created `test_notification_dispatch_extended.py`: 22 tests for channel dispatch (disabled targets, SSRF, exception paths, `_build_*` helpers).
+- Created `test_trigger_service_unit.py`: 31 unit tests for TriggerService internals (idempotency, rate-limit, device validation, lock release, retry exhaustion, process_trigger orchestration).
+- Created `test_worker_tasks_extended.py`: 13 tests for worker task branches (resolved/cancelled events, missing alarm_id/event_type, alarm not in DB, SSRF-blocked webhook, webhook-disabled early return).
+- Coverage threshold raised from 89% → 93%.
+
+#### Distributed tracing (Phase F)
+- `process_trigger` and `create_alarm` in `trigger_service.py` now accept `request_id` parameter.
+- `request_id` from API middleware is stored in `alarm.meta["request_id"]` at trigger time.
+- Yealink route passes `request.state.request_id` to `process_trigger`.
+
+#### Query performance logging (Phase G)
+- Added `SLOW_QUERY_LOG_MS` setting (default 200 ms).
+- `db/engine.py` installs SQLAlchemy `before_cursor_execute`/`after_cursor_execute` listeners emitting `slow_query` WARNING log when threshold is exceeded.
+
+#### Connection pool tuning (Phase I)
+- Added `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT`, `DB_POOL_RECYCLE` settings.
+- Wired into `create_async_engine` in `db/engine.py`.
+- Documented with production-safe defaults in `.env.example`.
+
 ## Backlog
 
-1. Extended search/filter options for admin operations.
-2. Distributed tracing (propagate request_id to worker tasks).
-3. Query performance logging.
-4. Connection pool tuning for production deployments.
+1. ~~Extended search/filter options for admin operations.~~ ✅ Already implemented (person_id, room_id, device_id, created_after, created_before, severity filters on `GET /v1/alarms`).
+2. ~~Distributed tracing (propagate request_id to worker tasks).~~ ✅ Phase 22.
+3. ~~Query performance logging.~~ ✅ Phase 22.
+4. ~~Connection pool tuning for production deployments.~~ ✅ Phase 22.
+5. Streaming export — `GET /v1/alarms/export` currently buffers up to 2 000 rows in memory before writing the response. Implement true server-side streaming to handle larger exports without memory pressure.
+6. ~~IP allowlist hardening — `YELK_IP_ALLOWLIST` defaults to blank (all IPs accepted). Add a startup `UserWarning` in `Settings` when the allowlist is empty and `simulation_enabled` is `False`.~~ ✅ Implemented (`warn_empty_ip_allowlist` model validator in `settings.py`).
+7. ~~Trigger response normalisation — unknown-token (404) vs. incomplete-mapping (409) leaks token validity to callers. Normalise both to a single 404 to prevent token-probing.~~ ✅ Implemented (always returns 404 in `trigger_service.py`).
 
 ## Definition of Done
 
 - Consolidated documentation in `docs/` with `docs/README.md` as index.
 - Unified Notes route and stable simulation endpoints with tests.
 - UI flows without known runtime errors in core paths.
-- Full green quality gates (lint + tests + mypy + coverage ≥ 85%).
+- Full green quality gates (lint + tests + mypy + coverage ≥ 93%).
 - Clean layer boundaries (zero backwards imports).
 - Zero deprecation warnings in test output.

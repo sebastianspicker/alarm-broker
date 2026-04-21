@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import secrets
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from arq.connections import ArqRedis
 from sqlalchemy import select
@@ -16,7 +18,11 @@ from alarm_broker import constants
 from alarm_broker.core.idempotency import bucket_10s, idempotency_key
 from alarm_broker.core.rate_limit import rate_limit_key
 from alarm_broker.db.models import Alarm, AlarmStatus, Device, Room
-from alarm_broker.services.event_publisher import EventPublisher
+from alarm_broker.services.event_service import (
+    EventResult,
+    enqueue_alarm_created_event,
+    enqueue_alarm_state_changed_event,
+)
 from alarm_broker.settings import Settings
 
 logger = logging.getLogger("alarm_broker")
@@ -79,6 +85,12 @@ class TriggerService:
     - Alarm creation
     """
 
+    _IDEMPOTENCY_LOOKUP_ATTEMPTS = 5
+    _IDEMPOTENCY_LOOKUP_DELAY_SECONDS = 0.05
+    _EVENT_ENQUEUE_ATTEMPTS = 3
+    _EVENT_ENQUEUE_DELAY_SECONDS = 0.1
+    _EVENT_RECOVERY_LOCK_TTL_SECONDS = 10
+
     def __init__(
         self,
         session: AsyncSession,
@@ -103,7 +115,6 @@ class TriggerService:
             idempotency_bucket if idempotency_bucket is not None else bucket_10s()
         )
         self._rate_limit_bucket = rate_limit_bucket
-        self._event_publisher = EventPublisher(redis)
 
     def _get_idempotency_key(self, token: str) -> str:
         """Get the Redis key for idempotency checking.
@@ -126,6 +137,8 @@ class TriggerService:
         Returns:
             Redis key string
         """
+        if self._rate_limit_bucket is None:
+            raise RuntimeError("Rate limit bucket is not set")
         return rate_limit_key(token, self._rate_limit_bucket)
 
     async def check_idempotency(self, token: str) -> tuple[bool, uuid.UUID | None]:
@@ -172,7 +185,8 @@ class TriggerService:
             existing = await self._redis.get(idem_key)
             if existing:
                 try:
-                    return uuid.UUID(existing)
+                    uuid.UUID(existing)
+                    return None
                 except ValueError:
                     # Invalid UUID, delete and retry
                     await self._redis.delete(idem_key)
@@ -227,6 +241,7 @@ class TriggerService:
         client_ip: str,
         user_agent: str,
         event: str | None = None,
+        request_id: str | None = None,
     ) -> Alarm:
         """Create a new alarm.
 
@@ -265,7 +280,9 @@ class TriggerService:
                 "received_at": now.isoformat(),
                 "client_ip": client_ip,
                 "user_agent": user_agent,
+                **({"request_id": request_id} if request_id else {}),
                 "idempotency": {"bucket": self._idempotency_bucket, "key": idem},
+                "event_delivery": self._event_delivery_defaults(),
             },
         )
         self._session.add(alarm)
@@ -273,21 +290,150 @@ class TriggerService:
 
         return alarm
 
-    async def enqueue_alarm_created(self, alarm_id: uuid.UUID) -> bool:
-        """Enqueue the alarm_created event.
+    def _event_delivery_defaults(self) -> dict[str, Any]:
+        return {
+            "alarm_created_enqueued": False,
+            "alarm_state_changed_enqueued": False,
+            "last_error": None,
+            "last_attempt_at": None,
+        }
 
-        Args:
-            alarm_id: ID of the created alarm
+    def _event_delivery_state(self, alarm: Alarm) -> dict[str, Any]:
+        meta = alarm.meta if isinstance(alarm.meta, dict) else {}
+        raw = meta.get("event_delivery")
+        state = self._event_delivery_defaults()
+        if isinstance(raw, dict):
+            state.update(raw)
+        return state
 
-        Returns:
-            True if enqueued successfully
-        """
-        try:
-            await self._event_publisher.publish_alarm_created(alarm_id=str(alarm_id))
+    async def _persist_event_delivery_state(
+        self,
+        alarm: Alarm,
+        *,
+        alarm_created_enqueued: bool | None = None,
+        alarm_state_changed_enqueued: bool | None = None,
+        last_error: str | None = None,
+    ) -> None:
+        state = self._event_delivery_state(alarm)
+        if alarm_created_enqueued is not None:
+            state["alarm_created_enqueued"] = alarm_created_enqueued
+        if alarm_state_changed_enqueued is not None:
+            state["alarm_state_changed_enqueued"] = alarm_state_changed_enqueued
+        state["last_error"] = last_error
+        state["last_attempt_at"] = datetime.now(UTC).isoformat()
+        alarm.meta = {**(alarm.meta or {}), "event_delivery": state}
+        await self._session.commit()
+
+    async def _load_alarm_with_retry(self, alarm_id: uuid.UUID) -> Alarm | None:
+        for attempt in range(self._IDEMPOTENCY_LOOKUP_ATTEMPTS):
+            alarm = await self._session.get(Alarm, alarm_id)
+            if alarm is not None:
+                return alarm
+            if attempt < self._IDEMPOTENCY_LOOKUP_ATTEMPTS - 1:
+                await asyncio.sleep(self._IDEMPOTENCY_LOOKUP_DELAY_SECONDS)
+        return None
+
+    async def _wait_for_event_delivery(self, alarm: Alarm) -> bool:
+        for attempt in range(self._IDEMPOTENCY_LOOKUP_ATTEMPTS):
+            await self._session.refresh(alarm)
+            state = self._event_delivery_state(alarm)
+            if state["alarm_created_enqueued"] and state["alarm_state_changed_enqueued"]:
+                return True
+            if attempt < self._IDEMPOTENCY_LOOKUP_ATTEMPTS - 1:
+                await asyncio.sleep(self._IDEMPOTENCY_LOOKUP_DELAY_SECONDS)
+        return False
+
+    async def _enqueue_event_with_retry(
+        self,
+        *,
+        enqueue: Any,
+    ) -> EventResult:
+        last_result = EventResult(success=False, error="enqueue did not run")
+        for attempt in range(self._EVENT_ENQUEUE_ATTEMPTS):
+            last_result = await enqueue()
+            if last_result.success:
+                return last_result
+            if attempt < self._EVENT_ENQUEUE_ATTEMPTS - 1:
+                await asyncio.sleep(self._EVENT_ENQUEUE_DELAY_SECONDS)
+        return last_result
+
+    def _get_event_recovery_lock_key(self, alarm_id: uuid.UUID) -> str:
+        return f"alarm:event-recovery:{alarm_id}"
+
+    async def _acquire_event_recovery_lock(self, alarm_id: uuid.UUID) -> str | None:
+        lock_key = self._get_event_recovery_lock_key(alarm_id)
+        token = secrets.token_urlsafe(16)
+        ok = await self._redis.set(
+            lock_key,
+            token,
+            ex=self._EVENT_RECOVERY_LOCK_TTL_SECONDS,
+            nx=True,
+        )
+        return token if ok else None
+
+    async def _release_event_recovery_lock(self, alarm_id: uuid.UUID, token: str) -> None:
+        lock_key = self._get_event_recovery_lock_key(alarm_id)
+        current = await self._redis.get(lock_key)
+        if current == token:
+            await self._redis.delete(lock_key)
+
+    async def _ensure_alarm_events_dispatched(self, alarm: Alarm) -> bool:
+        state = self._event_delivery_state(alarm)
+        if state["alarm_created_enqueued"] and state["alarm_state_changed_enqueued"]:
             return True
-        except Exception:
-            logger.exception("enqueue_alarm_created_failed", extra={"alarm_id": str(alarm_id)})
-            return False
+
+        lock_token = await self._acquire_event_recovery_lock(alarm.id)
+        if lock_token is None:
+            return await self._wait_for_event_delivery(alarm)
+
+        try:
+            await self._session.refresh(alarm)
+            state = self._event_delivery_state(alarm)
+
+            if not state["alarm_created_enqueued"]:
+                created_result = await self._enqueue_event_with_retry(
+                    enqueue=lambda: enqueue_alarm_created_event(
+                        self._redis,
+                        alarm_id=alarm.id,
+                        logger=logger,
+                    )
+                )
+                if not created_result.success:
+                    await self._persist_event_delivery_state(
+                        alarm,
+                        last_error=created_result.error or "alarm.created enqueue failed",
+                    )
+                    return False
+                await self._persist_event_delivery_state(
+                    alarm,
+                    alarm_created_enqueued=True,
+                )
+
+            if not state["alarm_state_changed_enqueued"]:
+                state_result = await self._enqueue_event_with_retry(
+                    enqueue=lambda: enqueue_alarm_state_changed_event(
+                        self._redis,
+                        alarm_id=alarm.id,
+                        state=alarm.status.value,
+                        logger=logger,
+                        old_state="none",
+                    )
+                )
+                if not state_result.success:
+                    await self._persist_event_delivery_state(
+                        alarm,
+                        last_error=state_result.error or "alarm.state_changed enqueue failed",
+                    )
+                    return False
+                await self._persist_event_delivery_state(
+                    alarm,
+                    alarm_state_changed_enqueued=True,
+                    last_error=None,
+                )
+
+            return True
+        finally:
+            await self._release_event_recovery_lock(alarm.id, lock_token)
 
     def _validate_trigger(
         self,
@@ -325,7 +471,7 @@ class TriggerService:
         """
         is_duplicate, existing_id = await self.check_idempotency(token)
         if is_duplicate and existing_id:
-            existing_alarm = await self._session.get(Alarm, existing_id)
+            existing_alarm = await self._load_alarm_with_retry(existing_id)
             if existing_alarm:
                 logger.info(
                     "trigger_idempotent",
@@ -335,8 +481,7 @@ class TriggerService:
                     },
                 )
                 return True, existing_id, existing_alarm
-            # Invalid reference, clear and continue
-            await self.clear_idempotency(token)
+            return True, existing_id, None
         return False, None, None
 
     async def _reserve_idempotency_key(self, token: str) -> uuid.UUID | None:
@@ -357,27 +502,21 @@ class TriggerService:
         return alarm_id
 
     async def _send_notifications(self, alarm: Alarm) -> bool:
-        """Send notifications for the created alarm.
+        """Ensure downstream events are enqueued or marked for recovery."""
+        return await self._ensure_alarm_events_dispatched(alarm)
 
-        Calls NotificationService to send notifications to appropriate targets.
+    async def recover_alarm_events(self, alarm: Alarm) -> bool:
+        """Recover missing downstream events for a persisted alarm."""
+        return await self._ensure_alarm_events_dispatched(alarm)
 
-        Args:
-            alarm: Created alarm instance
-
-        Returns:
-            True if notifications sent successfully
-        """
-        # Enqueue notification task
-        notification_ok = await self.enqueue_alarm_created(alarm.id)
-
-        # Enqueue state changed event via EventPublisher
-        await self._event_publisher.publish_alarm_state_changed(
-            alarm_id=str(alarm.id),
-            old_state="none",
-            new_state=alarm.status.value,
-        )
-
-        return notification_ok
+    async def _handle_duplicate_alarm(self, alarm: Alarm) -> TriggerResult:
+        events_ok = await self._send_notifications(alarm)
+        if not events_ok:
+            return TriggerResult.error(
+                503,
+                "Alarm already exists, but downstream processing still needs a retry request.",
+            )
+        return TriggerResult.ok(alarm.id, alarm.status, is_duplicate=True)
 
     async def process_trigger(
         self,
@@ -385,6 +524,7 @@ class TriggerService:
         client_ip: str,
         user_agent: str,
         event: str | None = None,
+        request_id: str | None = None,
     ) -> TriggerResult:
         """Process an alarm trigger request (orchestrator).
 
@@ -400,7 +540,9 @@ class TriggerService:
         # Step 2: Check idempotency - return existing if duplicate
         is_duplicate, _, existing_alarm = await self._check_idempotency(token)
         if is_duplicate and existing_alarm:
-            return TriggerResult.ok(existing_alarm.id, existing_alarm.status, is_duplicate=True)
+            return await self._handle_duplicate_alarm(existing_alarm)
+        if is_duplicate:
+            return TriggerResult.error(409, "An alarm for this token is already being created.")
 
         # Step 3: Check rate limit (before reserving idempotency key)
         if not await self.check_rate_limit(token):
@@ -416,23 +558,47 @@ class TriggerService:
         # Step 4: Reserve idempotency key
         alarm_id = await self._reserve_idempotency_key(token)
         if not alarm_id:
+            is_duplicate, _, existing_alarm = await self._check_idempotency(token)
+            if is_duplicate and existing_alarm:
+                return await self._handle_duplicate_alarm(existing_alarm)
+            if is_duplicate:
+                return TriggerResult.error(409, "An alarm for this token is already being created.")
             return TriggerResult.error(500, "Idempotency failure")
 
         # Step 5: Validate device
         device, device_error = await self.validate_device(token)
         if device_error or device is None:
             await self.clear_idempotency(token)
-            status_code = 404 if device_error == "Unknown token" else 409
-            return TriggerResult.error(status_code, device_error or "Unknown device error")
+            # Always 404 — distinguishing "unknown token" (404) from "mapping incomplete"
+            # (409) would let callers probe for valid device tokens.
+            return TriggerResult.error(404, device_error or "Unknown device error")
 
-        alarm = await self.create_alarm(
-            device=device,
-            alarm_id=alarm_id,
-            client_ip=client_ip,
-            user_agent=user_agent,
-            event=event,
-        )
-        await self._send_notifications(alarm)
+        try:
+            alarm = await self.create_alarm(
+                device=device,
+                alarm_id=alarm_id,
+                client_ip=client_ip,
+                user_agent=user_agent,
+                event=event,
+                request_id=request_id,
+            )
+        except Exception:
+            await self.clear_idempotency(token)
+            logger.exception(
+                "alarm_create_failed",
+                extra={"alarm_id": str(alarm_id), "token_hash": _hash_token_for_logging(token)},
+            )
+            return TriggerResult.error(500, "Alarm creation failed")
+
+        if not await self._send_notifications(alarm):
+            logger.warning(
+                "alarm_event_enqueue_incomplete",
+                extra={"alarm_id": str(alarm.id)},
+            )
+            return TriggerResult.error(
+                503,
+                "Alarm was created, but downstream processing still needs a retry request.",
+            )
 
         logger.info(
             "alarm_triggered",

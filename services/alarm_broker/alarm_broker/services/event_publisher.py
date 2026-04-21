@@ -138,7 +138,17 @@ class EventPublisher:
             "timestamp": datetime.now(UTC).isoformat(),
             **kwargs,
         }
-        await self._redis.enqueue_job(self.JOB_NAME, payload)
+        await self._redis.enqueue_job(
+            self.JOB_NAME,
+            payload,
+            _job_id=self._job_id_for_event(event_type, alarm_id, **kwargs),
+        )
+
+    def _job_id_for_event(self, event_type: str, alarm_id: int | str, **kwargs: Any) -> str:
+        alarm_id_str = str(alarm_id)
+        if event_type == EVENT_ALARM_STATE_CHANGED:
+            return f"{self.JOB_NAME}:{event_type}:{alarm_id_str}:{kwargs.get('new_state', '')}"
+        return f"{self.JOB_NAME}:{event_type}:{alarm_id_str}"
 
     @classmethod
     def from_alarm(cls, redis: ArqRedis, alarm: "Alarm") -> "EventPublisher":

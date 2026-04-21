@@ -83,8 +83,7 @@ async def test_missing_room_falls_back_to_room_id(
 
     assert result["person_name"] == "Person X"
     assert result["room_label"] == "nonexistent-room"
-    # site_name falls back to site_id from the alarm because the room lookup failed
-    assert result["site_name"] == "bg"
+    assert result["site_name"] == "Standort BG"
 
 
 async def test_alarm_with_no_person_or_room(sessionmaker: async_sessionmaker, seeded_db: None):
@@ -137,3 +136,79 @@ async def test_missing_site_falls_back_to_room_site_id(
     assert result["person_name"] is None
     assert result["room_label"] == "Raum 1.23"
     assert result["site_name"] == "Standort BG"
+
+
+async def test_missing_room_and_unknown_site_falls_back_to_alarm_site_id(
+    sessionmaker: async_sessionmaker, seeded_db: None
+):
+    """When neither room nor site resolve, site_name falls back to alarm.site_id."""
+    alarm = _make_alarm(person_id="ma-012", room_id="nonexistent-room", site_id="missing-site")
+
+    async with sessionmaker() as session:
+        session.add(alarm)
+        await session.commit()
+
+        result = await enrich_alarm_context(session, alarm)
+
+    assert result["person_name"] == "Person X"
+    assert result["room_label"] == "nonexistent-room"
+    assert result["site_name"] == "missing-site"
+
+
+async def test_room_found_site_row_missing_falls_back_to_room_site_id(
+    sessionmaker: async_sessionmaker, seeded_db: None
+):
+    """Room exists and has site_id, but Site row is absent → fall back to room.site_id string."""
+    from alarm_broker.db.models import Room
+
+    orphan_site_id = "orphan-site"
+
+    async with sessionmaker() as session:
+        # SQLite does not enforce FK constraints by default, so we can create
+        # a Room referencing a Site that does not exist.
+        orphan_room = Room(id="orphan-room", site_id=orphan_site_id, label="Orphan Room", floor="0")
+        session.add(orphan_room)
+        await session.commit()
+
+    alarm = _make_alarm(room_id="orphan-room", site_id=None)
+
+    async with sessionmaker() as session:
+        session.add(alarm)
+        await session.commit()
+
+        result = await enrich_alarm_context(session, alarm)
+
+    assert result["room_label"] == "Orphan Room"
+    # Site row does not exist → falls back to room.site_id
+    assert result["site_name"] == orphan_site_id
+
+
+async def test_no_room_id_known_site_id_resolves(sessionmaker: async_sessionmaker, seeded_db: None):
+    """When alarm.room_id is None but alarm.site_id resolves, site_name is set from Site."""
+    alarm = _make_alarm(person_id=None, room_id=None, site_id="bg")
+
+    async with sessionmaker() as session:
+        session.add(alarm)
+        await session.commit()
+
+        result = await enrich_alarm_context(session, alarm)
+
+    assert result["room_label"] is None
+    assert result["site_name"] == "Standort BG"
+
+
+async def test_no_room_id_unknown_site_id_falls_back(
+    sessionmaker: async_sessionmaker, seeded_db: None
+):
+    """When alarm.room_id is None and alarm.site_id has no Site row,
+    falls back to the site_id string."""
+    alarm = _make_alarm(person_id=None, room_id=None, site_id="nonexistent-site")
+
+    async with sessionmaker() as session:
+        session.add(alarm)
+        await session.commit()
+
+        result = await enrich_alarm_context(session, alarm)
+
+    assert result["room_label"] is None
+    assert result["site_name"] == "nonexistent-site"

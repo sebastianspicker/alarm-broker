@@ -151,26 +151,14 @@ async def test_ack_form_rejects_oversized_note(
                 assert alarm.ack_token is not None
                 ack_token = alarm.ack_token
 
-            # GET the ACK page to obtain the CSRF cookie and token
             get_resp = await client.get(f"/a/{ack_token}")
             assert get_resp.status_code == 200
             match = re.search(r'name="csrf_token"\s+value="([^"]+)"', get_resp.text)
             csrf_value = match.group(1) if match else ""
 
-            # Manually set the csrf_token cookie because the server sets
-            # Secure=True but tests use http:// transport.
-            set_cookie = get_resp.headers.get("set-cookie", "")
-            if "csrf_token=" in set_cookie:
-                token = set_cookie.split("csrf_token=")[1].split(";")[0]
-                client.cookies.set("csrf_token", token)
-
             resp = await client.post(
                 f"/a/{ack_token}",
-                data={
-                    "acked_by": "Tester",
-                    "note": "x" * 2001,
-                    "csrf_token": csrf_value,
-                },
+                data={"acked_by": "Tester", "note": "x" * 2001, "csrf_token": csrf_value},
             )
 
     assert resp.status_code == 422
@@ -434,7 +422,9 @@ async def test_policy_rejects_missing_target_references(engine, seeded_db, fake_
     assert resp.status_code == 400
 
 
-def test_default_zammad_api_token_is_empty() -> None:
+def test_default_zammad_api_token_is_empty(monkeypatch) -> None:
+    monkeypatch.setenv("ADMIN_API_KEY", "test-admin-key")
+    monkeypatch.setenv("SIMULATION_ENABLED", "true")
     assert Settings().zammad_api_token == ""
 
 

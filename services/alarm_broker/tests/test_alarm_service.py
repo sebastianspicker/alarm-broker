@@ -66,6 +66,22 @@ async def test_get_alarm_by_ack_token_not_found(sessionmaker: async_sessionmaker
     assert result is None
 
 
+async def test_get_alarm_by_ack_token_soft_deleted_raises_not_found(
+    sessionmaker: async_sessionmaker, engine
+):
+    """Raises NotFoundError when the alarm exists but has been soft-deleted."""
+    alarm = _make_alarm(ack_token="soft-deleted-token")
+    alarm.deleted_at = datetime.now(UTC)
+
+    async with sessionmaker() as session:
+        session.add(alarm)
+        await session.commit()
+
+    async with sessionmaker() as session:
+        with pytest.raises(NotFoundError):
+            await get_alarm_by_ack_token(session, "soft-deleted-token")
+
+
 # ── acknowledge_alarm ──────────────────────────────────────────────────
 
 

@@ -107,7 +107,7 @@ A request middleware adds:
 - request ID (`X-Request-ID` response header),
 - structured request logs with route, status, latency, and optional alarm ID.
 
-Prometheus metrics at `/metrics` expose HTTP request counts, alarm status gauges, and notification attempt counters.
+Prometheus metrics at `/metrics` expose HTTP request counts, alarm status gauges, and notification attempt counters. The endpoint is protected by the admin API key rather than being publicly scrapeable by default.
 
 ## Security baseline
 

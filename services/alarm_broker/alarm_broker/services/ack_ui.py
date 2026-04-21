@@ -1,19 +1,13 @@
 from __future__ import annotations
 
 from html import escape
-from pathlib import Path
 from string import Template
 
+from alarm_broker.api.template_loader import load_template
 from alarm_broker.db.models import Alarm, AlarmStatus
 from alarm_broker.types import EnrichedAlarmContext
 
-_TEMPLATE = Template(
-    Path(__file__)
-    .resolve()
-    .parents[1]
-    .joinpath("api", "templates", "ack.html")
-    .read_text(encoding="utf-8")
-)
+_TEMPLATE: Template = load_template("ack.html")
 
 
 def render_ack_page(alarm: Alarm, enriched: EnrichedAlarmContext, *, csrf_token: str = "") -> str:
@@ -31,7 +25,9 @@ def render_ack_page(alarm: Alarm, enriched: EnrichedAlarmContext, *, csrf_token:
     }
     info_messages = {
         AlarmStatus.TRIGGERED: "Bitte quittiere den Alarm, wenn du die Übernahme bestätigst.",
-        AlarmStatus.ACKNOWLEDGED: "Dieser Alarm wurde erfolgreich übernommen. Das Einsatzteam wurde benachrichtigt.",
+        AlarmStatus.ACKNOWLEDGED: (
+            "Dieser Alarm wurde erfolgreich übernommen. Das Einsatzteam wurde benachrichtigt."
+        ),
         AlarmStatus.RESOLVED: "Dieser Alarm ist bereits gelöst. Keine weitere Aktion erforderlich.",
         AlarmStatus.CANCELLED: "Dieser Alarm wurde storniert. Keine weitere Aktion erforderlich.",
     }

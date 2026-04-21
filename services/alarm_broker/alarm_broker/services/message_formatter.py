@@ -15,7 +15,7 @@ def format_alarm_message(
     room: str,
     site: str | None,
     created_at: datetime,
-    ack_url: str,
+    ack_url: str | None,
     step_no: int,
 ) -> str:
     parts = [
@@ -25,6 +25,7 @@ def format_alarm_message(
         f"Ort: {room}" + (f" / {site}" if site else ""),
         f"Zeit: {created_at.isoformat()}",
         f"Stufe: {step_no}",
-        f"Quittieren: {ack_url}",
     ]
+    if ack_url:
+        parts.append(f"Quittieren: {ack_url}")
     return "\n".join(parts)

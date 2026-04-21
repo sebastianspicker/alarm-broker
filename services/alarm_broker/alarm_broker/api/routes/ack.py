@@ -2,16 +2,21 @@ from __future__ import annotations
 
 import logging
 import secrets
-import time
-from collections import defaultdict
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from alarm_broker.api.deps import get_app_settings, get_client_ip, get_redis, get_session
+from alarm_broker.api.deps import (
+    get_app_settings,
+    get_client_ip,
+    get_redis,
+    get_session,
+    is_secure_request,
+)
 from alarm_broker.api.schemas import AckIn
+from alarm_broker.core.rate_limit import minute_bucket, rate_limit_key
 from alarm_broker.services.ack_ui import render_ack_page
 from alarm_broker.services.alarm_service import acknowledge_alarm, get_alarm_by_ack_token
 from alarm_broker.services.enrichment_service import enrich_alarm_context
@@ -26,43 +31,33 @@ logger = logging.getLogger("alarm_broker")
 
 _CSRF_COOKIE_NAME = "csrf_token"
 
-# In-memory rate limiter: IP -> list of request timestamps
-_ACK_RATE_LIMIT: dict[str, list[float]] = defaultdict(list)
 _ACK_RATE_MAX = 10
 _ACK_RATE_WINDOW = 60  # seconds
-_ACK_RATE_LIMIT_MAX_ENTRIES = 10_000
 
 
-def _check_ack_rate_limit(request: Request, settings: Settings | None = None) -> None:
+def _ack_rate_limit_key(client_ip: str) -> str:
+    return rate_limit_key(f"ack:{client_ip}", minute_bucket())
+
+
+async def _check_ack_rate_limit(
+    request: Request,
+    redis,
+    settings: Settings | None = None,
+) -> None:
     """Enforce per-IP rate limit on ACK endpoints (10 req/min)."""
     client_ip = get_client_ip(request, settings)
-    now = time.time()
-    window_start = now - _ACK_RATE_WINDOW
-
-    # Prune old entries for this IP
-    timestamps = _ACK_RATE_LIMIT[client_ip]
-    _ACK_RATE_LIMIT[client_ip] = [t for t in timestamps if t > window_start]
-
-    if len(_ACK_RATE_LIMIT[client_ip]) >= _ACK_RATE_MAX:
+    rl_key = _ack_rate_limit_key(client_ip)
+    rl_val = await redis.incr(rl_key)
+    if rl_val == 1:
+        await redis.expire(rl_key, _ACK_RATE_WINDOW + 10)
+    if rl_val > _ACK_RATE_MAX:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Too many requests. Limit: {_ACK_RATE_MAX} per {_ACK_RATE_WINDOW}s. Please wait and try again.",
+            detail=(
+                f"Too many requests. Limit: {_ACK_RATE_MAX} per {_ACK_RATE_WINDOW}s. "
+                "Please wait and try again."
+            ),
         )
-    _ACK_RATE_LIMIT[client_ip].append(now)
-
-    # Periodic cleanup: remove stale IPs and enforce max-size guard
-    stale_ips = [ip for ip, ts in _ACK_RATE_LIMIT.items() if not ts or ts[-1] <= window_start]
-    for ip in stale_ips:
-        del _ACK_RATE_LIMIT[ip]
-
-    if len(_ACK_RATE_LIMIT) > _ACK_RATE_LIMIT_MAX_ENTRIES:
-        # Evict oldest entries by most-recent timestamp
-        sorted_ips = sorted(
-            _ACK_RATE_LIMIT,
-            key=lambda ip: _ACK_RATE_LIMIT[ip][-1] if _ACK_RATE_LIMIT[ip] else 0,
-        )
-        for ip in sorted_ips[: len(_ACK_RATE_LIMIT) - _ACK_RATE_LIMIT_MAX_ENTRIES]:
-            del _ACK_RATE_LIMIT[ip]
 
 
 @router.get("/a/{ack_token}", response_class=HTMLResponse)
@@ -72,7 +67,8 @@ async def ack_page(
     session: AsyncSession = Depends(get_session),
 ) -> HTMLResponse:
     settings = get_app_settings(request)
-    _check_ack_rate_limit(request, settings)
+    redis = get_redis(request)
+    await _check_ack_rate_limit(request, redis, settings)
     alarm = await get_alarm_by_ack_token(session, ack_token)
     if not alarm:
         raise HTTPException(
@@ -88,7 +84,7 @@ async def ack_page(
         key=_CSRF_COOKIE_NAME,
         value=csrf_token,
         httponly=True,
-        secure=True,
+        secure=is_secure_request(request, settings),
         samesite="strict",
         max_age=3600,
     )
@@ -103,7 +99,8 @@ async def ack_submit(
     session: AsyncSession = Depends(get_session),
 ) -> HTMLResponse:
     settings = get_app_settings(request)
-    _check_ack_rate_limit(request, settings)
+    redis = get_redis(request)
+    await _check_ack_rate_limit(request, redis, settings)
     alarm = await get_alarm_by_ack_token(session, ack_token)
     if not alarm:
         raise HTTPException(
@@ -140,7 +137,6 @@ async def ack_submit(
     )
     if changed:
         request.state.alarm_id = str(alarm.id)
-        redis = get_redis(request)
         ack_result = await enqueue_alarm_acked_event(
             redis,
             alarm_id=alarm.id,

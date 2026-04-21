@@ -6,7 +6,8 @@ We release patches for security vulnerabilities. The following versions are curr
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
+| 0.2.x   | :white_check_mark: |
+| 0.1.x   | :x:                |
 
 ## Reporting a Vulnerability
 
@@ -17,8 +18,10 @@ If you discover a security vulnerability, please report it by creating a GitHub 
 ### Authentication
 
 - Admin API endpoints require a secure API key (`X-Admin-Key` header)
+- The browser-based admin UI uses a short-lived Redis-backed session cookie issued by `/admin/login`
 - Admin key must be configured via `ADMIN_API_KEY` environment variable
-- Empty admin key results in fail-closed behavior (500 error)
+- `/metrics` is protected by the same admin API key requirement
+- Empty admin key fails closed: API endpoints reject access and admin login cannot establish a session
 
 ### Rate Limiting
 
@@ -29,6 +32,7 @@ If you discover a security vulnerability, please report it by creating a GitHub 
 
 - Yealink endpoints support IP allowlisting
 - Configurable via `YELK_IP_ALLOWLIST` environment variable
+- An empty allowlist disables source-IP filtering; treat that as local-dev or trusted-network only
 
 ### Trusted Proxy
 
@@ -56,6 +60,7 @@ CORS is not configured. The service is designed for same-origin access behind a 
 ## Best Practices
 
 1. **Use HTTPS in production** - Configure a reverse proxy with TLS
+2. **Trust proxies explicitly** - Set `TRUSTED_PROXY_CIDRS` before relying on forwarded HTTPS or client IP headers
 2. **Generate strong API keys** - Use random keys with sufficient entropy:
    ```bash
    python -c "import secrets; print(secrets.token_urlsafe(32))"

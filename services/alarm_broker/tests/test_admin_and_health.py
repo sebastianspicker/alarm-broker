@@ -136,6 +136,85 @@ async def test_admin_dashboard_without_api_key_returns_401(engine, seeded_db, fa
     assert response.status_code == 401
 
 
+async def test_admin_login_cookie_works_over_local_http(engine, seeded_db, fake_redis, settings):
+    """Local HTTP login should work without manually injecting cookies in tests."""
+    settings.admin_api_key = "dev-admin-key"
+    app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            login = await client.post(
+                "/admin/login",
+                data={"admin_key": "dev-admin-key"},
+                follow_redirects=False,
+            )
+            dashboard = await client.get("/admin")
+
+    assert login.status_code == 303
+    assert "Secure" not in login.headers.get("set-cookie", "")
+    assert dashboard.status_code == 200
+
+
+async def test_admin_session_expires_via_redis_ttl(engine, seeded_db, fake_redis, settings):
+    """Admin sessions should expire based on Redis TTL rather than process-local state."""
+    settings.admin_api_key = "dev-admin-key"
+    app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            await admin_login(client, "dev-admin-key")
+            fake_redis.advance(3601)
+            response = await client.get("/admin")
+
+    assert response.status_code == 401
+
+
+async def test_ack_rate_limit_is_shared_through_redis(
+    engine, sessionmaker, seeded_db, fake_redis, settings
+):
+    """ACK throttling should apply across clients sharing the same Redis backend."""
+    alarm_id = uuid.uuid4()
+
+    async with sessionmaker() as session:
+        session.add(
+            Alarm(
+                id=alarm_id,
+                status=AlarmStatus.TRIGGERED,
+                source="test",
+                event="alarm.trigger",
+                person_id="ma-012",
+                room_id="bg-1.23",
+                site_id="bg",
+                device_id="ylk-t5-10023",
+                severity="P0",
+                silent=True,
+                ack_token="ack-rate-limit-test",
+                created_at=datetime.now(UTC),
+                meta={},
+            )
+        )
+        await session.commit()
+
+    app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client_a:
+            async with AsyncClient(transport=transport, base_url="http://test") as client_b:
+                for _ in range(5):
+                    response = await client_a.get("/a/ack-rate-limit-test")
+                    assert response.status_code == 200
+                for _ in range(5):
+                    response = await client_b.get("/a/ack-rate-limit-test")
+                    assert response.status_code == 200
+
+                throttled = await client_b.get("/a/ack-rate-limit-test")
+
+    assert throttled.status_code == 429
+
+
 async def test_readyz_healthy_returns_200(engine, seeded_db, fake_redis, settings):
     """Readyz returns 200 when DB and Redis are healthy."""
     app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)

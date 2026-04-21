@@ -161,10 +161,15 @@ alarm-broker/
 |----------|--------|-------------|
 | `/healthz` | GET | Liveness check |
 | `/readyz` | GET | Readiness check (DB + Redis) |
-| `/metrics` | GET | Prometheus-style metrics |
 | `/v1/yealink/alarm` | GET | Yealink alarm trigger |
 | `/a/{ack_token}` | GET/POST | Alarm acknowledgment UI |
-| `/admin` | GET | Admin dashboard (`?key=...`) |
+| `/admin/login` | GET/POST | Admin login form that sets a session cookie |
+
+### Operator UI
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/admin` | GET | Admin dashboard (requires the `admin_session` cookie from `/admin/login`) |
 
 ### Admin (require `X-Admin-Key` header)
 
@@ -178,7 +183,13 @@ alarm-broker/
 | `/v1/alarms/bulk/ack` | POST | Bulk acknowledge |
 | `/v1/alarms/bulk/resolve` | POST | Bulk resolve |
 | `/v1/alarms/bulk/cancel` | POST | Bulk cancel |
+| `/metrics` | GET | Prometheus-style metrics |
 | `/v1/admin/seed` | POST | Load seed data |
+
+Cookie behavior:
+
+- Local HTTP development on `http://localhost:8080` uses non-`Secure` admin and CSRF cookies so browser login and ACK flows work without TLS.
+- HTTPS requests, or requests forwarded as HTTPS by a trusted proxy, use `Secure` cookies.
 
 ## Contributing
 

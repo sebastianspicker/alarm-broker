@@ -129,3 +129,19 @@ def test_format_alarm_message_returns_string():
     )
 
     assert isinstance(result, str)
+
+
+def test_format_alarm_message_omits_ack_line_when_missing():
+    """When no ACK URL exists, the message omits the quittieren line."""
+    created = datetime(2025, 1, 1, 0, 0, 0, tzinfo=UTC)
+    result = format_alarm_message(
+        alarm_id="no-ack-url",
+        person="P",
+        room="R",
+        site=None,
+        created_at=created,
+        ack_url=None,
+        step_no=1,
+    )
+
+    assert "Quittieren:" not in result

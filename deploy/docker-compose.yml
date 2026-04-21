@@ -4,7 +4,7 @@ services:
     environment:
       POSTGRES_DB: alarm
       POSTGRES_USER: alarm
-      POSTGRES_PASSWORD: change-me
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -79,6 +79,8 @@ services:
     env_file:
       - ../.env
     command: ["arq", "alarm_broker.worker.settings.WorkerSettings"]
+    healthcheck:
+      disable: true
     depends_on:
       postgres:
         condition: service_healthy

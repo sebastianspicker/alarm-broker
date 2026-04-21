@@ -10,6 +10,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, TypedDict
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -18,9 +19,11 @@ from alarm_broker.connectors.sendxms import SendXmsClient
 from alarm_broker.connectors.signal import SignalClient
 from alarm_broker.connectors.zammad import ZammadClient
 from alarm_broker.core.metrics import record_event
+from alarm_broker.core.url_validation import SSRFError, validate_url_not_internal
 from alarm_broker.db.models import Alarm, AlarmStatus
 from alarm_broker.services.enrichment_service import enrich_alarm_context
 from alarm_broker.services.notification_service import NotificationService, log_notification
+from alarm_broker.services.trigger_service import TriggerService
 from alarm_broker.settings import Settings
 
 logger = logging.getLogger("alarm_broker")
@@ -96,6 +99,14 @@ def _get_notification_service(ctx: dict) -> NotificationService:
     )
 
 
+def _has_incomplete_event_delivery(alarm: Alarm) -> bool:
+    meta = alarm.meta if isinstance(alarm.meta, dict) else {}
+    state = meta.get("event_delivery")
+    if not isinstance(state, dict):
+        return False
+    return not state.get("alarm_created_enqueued") or not state.get("alarm_state_changed_enqueued")
+
+
 async def alarm_created(ctx: dict, alarm_id: str) -> None:
     """Enrich context, open Zammad ticket, send stage 0 notifications, schedule escalations."""
     alarm_uuid = uuid.UUID(alarm_id)
@@ -132,11 +143,19 @@ async def alarm_created(ctx: dict, alarm_id: str) -> None:
         schedule = await notification.get_escalation_schedule(session)
         for step_no, after_seconds in schedule:
             await ctx["redis"].enqueue_job(
-                "escalate", alarm_id, step_no, _defer_by=int(after_seconds)
+                "escalate",
+                alarm_id,
+                step_no,
+                _defer_by=int(after_seconds),
+                _job_id=f"escalate:{alarm_id}:{step_no}",
             )
             logger.info(
                 "escalation_scheduled",
-                extra={"alarm_id": alarm_id, "step_no": step_no, "after_seconds": after_seconds},
+                extra={
+                    "alarm_id": alarm_id,
+                    "step_no": step_no,
+                    "after_seconds": after_seconds,
+                },
             )
 
 
@@ -282,6 +301,29 @@ async def alarm_state_changed(ctx: dict, alarm_id: str, state: str) -> None:
             )
             return
 
+        try:
+            await validate_url_not_internal(settings.webhook_url)
+        except SSRFError as exc:
+            logger.warning(
+                "webhook_url_rejected",
+                extra={
+                    "alarm_id": alarm_id,
+                    "webhook_url": settings.webhook_url,
+                    "error": str(exc),
+                },
+            )
+            await log_notification(
+                session,
+                alarm_id=alarm.id,
+                channel="webhook",
+                target_id=None,
+                payload={"state": state},
+                result="error",
+                error=str(exc),
+            )
+            record_event("webhook_delivery_error")
+            return
+
         payload = _build_webhook_payload(alarm, state)
         payload_bytes = json.dumps(payload, separators=(",", ":")).encode()
         headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -303,6 +345,44 @@ async def alarm_state_changed(ctx: dict, alarm_id: str, state: str) -> None:
             session=session,
             state=state,
         )
+
+
+async def recover_incomplete_alarm_events(ctx: dict) -> None:
+    """Periodically retry incomplete trigger-side event publication."""
+    sessionmaker = ctx["sessionmaker"]
+    settings = ctx["settings"]
+    redis = ctx["redis"]
+    batch_size = 500
+
+    async with sessionmaker() as session:
+        trigger = TriggerService(session, redis, settings)
+        offset = 0
+
+        while True:
+            alarms = (
+                await session.scalars(
+                    select(Alarm)
+                    .where(Alarm.deleted_at.is_(None))
+                    .order_by(Alarm.created_at.desc(), Alarm.id.desc())
+                    .offset(offset)
+                    .limit(batch_size)
+                )
+            ).all()
+            if not alarms:
+                break
+
+            for alarm in alarms:
+                if not _has_incomplete_event_delivery(alarm):
+                    continue
+                recovered = await trigger.recover_alarm_events(alarm)
+                logger.info(
+                    "alarm_event_recovery_attempted",
+                    extra={"alarm_id": str(alarm.id), "recovered": recovered},
+                )
+
+            if len(alarms) < batch_size:
+                break
+            offset += batch_size
 
 
 def _build_webhook_payload(alarm: Alarm, state: str) -> dict[str, Any]:

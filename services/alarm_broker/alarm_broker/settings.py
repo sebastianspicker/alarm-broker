@@ -76,6 +76,15 @@ class Settings(BaseSettings):
     escalate_t2: int = Field(default=180, ge=0)
     escalate_t3: int = Field(default=300, ge=0)
 
+    # Database connection pool
+    db_pool_size: int = Field(default=5, ge=1, le=100)
+    db_max_overflow: int = Field(default=10, ge=0, le=200)
+    db_pool_timeout: int = Field(default=30, ge=1, le=300)
+    db_pool_recycle: int = Field(default=1800, ge=60, le=86400)
+
+    # Performance diagnostics
+    slow_query_log_ms: int = Field(default=200, ge=0)
+
     # Simulation mode
     simulation_enabled: bool = False
     simulation_seed_url: str = ""
@@ -118,6 +127,21 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"Refusing to start with a weak ADMIN_API_KEY ('{self.admin_api_key}'). "
                 "Set a strong key or enable simulation mode for development."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def warn_empty_ip_allowlist(self) -> Settings:
+        """Warn when the Yealink IP allowlist is blank in non-simulation mode."""
+        if not self.simulation_enabled and not self.yelk_ip_allowlist.strip():
+            import warnings
+
+            warnings.warn(
+                "YELK_IP_ALLOWLIST is not set. The alarm trigger endpoint accepts requests "
+                "from all IP addresses. Set YELK_IP_ALLOWLIST to a comma-separated list of "
+                "trusted CIDRs, or enable SIMULATION_ENABLED for local development.",
+                UserWarning,
+                stacklevel=2,
             )
         return self
 

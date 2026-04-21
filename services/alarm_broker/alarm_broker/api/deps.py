@@ -99,3 +99,18 @@ def get_client_ip(request: Request, settings: Settings | None = None) -> str:
     if _is_ip(peer_ip):
         return peer_ip
     return "127.0.0.1"
+
+
+def is_secure_request(request: Request, settings: Settings | None = None) -> bool:
+    if request.url.scheme == "https":
+        return True
+
+    peer_ip = request.client.host if request.client else ""
+    trusted_proxy_cidrs = settings.trusted_proxy_cidrs if settings else ""
+    forwarded_proto = request.headers.get("x-forwarded-proto", "")
+
+    if forwarded_proto and _is_trusted_proxy(peer_ip, trusted_proxy_cidrs):
+        first_proto = forwarded_proto.split(",")[0].strip().lower()
+        return first_proto == "https"
+
+    return False

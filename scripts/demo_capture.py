@@ -86,7 +86,9 @@ def _http_json(
     body: bytes | None = None,
     timeout: float = 10.0,
 ) -> HttpResult:
-    req = request.Request(url=url, data=body, method=method.upper(), headers=headers or {})
+    req = request.Request(
+        url=url, data=body, method=method.upper(), headers=headers or {}
+    )
     try:
         with request.urlopen(req, timeout=timeout) as response:  # noqa: S310
             raw = response.read().decode("utf-8")
@@ -136,6 +138,14 @@ def _admin_headers(admin_key: str) -> dict[str, str]:
     return {"X-Admin-Key": admin_key, "Content-Type": "application/json"}
 
 
+def _login_admin_ui(page: Any, base_url: str, admin_key: str) -> None:
+    page.goto(f"{base_url}/admin/login", wait_until="networkidle")
+    page.fill("#admin_key", admin_key)
+    page.click("button[type='submit']")
+    page.wait_for_url(f"{base_url}/admin*")
+    page.wait_for_selector("#alarm-search")
+
+
 def _require_ok(result: HttpResult, message: str) -> None:
     if result.status_code >= 400:
         detail = _extract_detail(result.json_body) or result.body
@@ -151,7 +161,9 @@ def _trigger_alarm(base_url: str, token: str, timeout: float) -> str:
     return str(result.json_body["alarm_id"])
 
 
-def _get_alarm(base_url: str, admin_key: str, alarm_id: str, timeout: float) -> dict[str, Any]:
+def _get_alarm(
+    base_url: str, admin_key: str, alarm_id: str, timeout: float
+) -> dict[str, Any]:
     result = _http_json(
         "GET",
         f"{base_url}/v1/alarms/{alarm_id}",
@@ -160,11 +172,15 @@ def _get_alarm(base_url: str, admin_key: str, alarm_id: str, timeout: float) -> 
     )
     _require_ok(result, f"Failed to fetch alarm {alarm_id}")
     if not isinstance(result.json_body, dict):
-        raise DemoCaptureError(f"Alarm details for {alarm_id} not in JSON object format.")
+        raise DemoCaptureError(
+            f"Alarm details for {alarm_id} not in JSON object format."
+        )
     return result.json_body
 
 
-def _resolve_alarm(base_url: str, admin_key: str, alarm_id: str, timeout: float) -> None:
+def _resolve_alarm(
+    base_url: str, admin_key: str, alarm_id: str, timeout: float
+) -> None:
     payload = {
         "actor": "Demo Script",
         "note": "Screenshot flow resolve",
@@ -213,7 +229,9 @@ def _resolve_all_triggered(base_url: str, admin_key: str, timeout: float) -> Non
     if not isinstance(result.json_body, list):
         return
     alarm_ids = [
-        item.get("id") for item in result.json_body if isinstance(item, dict) and item.get("id")
+        item.get("id")
+        for item in result.json_body
+        if isinstance(item, dict) and item.get("id")
     ]
     if not alarm_ids:
         return
@@ -260,7 +278,7 @@ def _wait_for_simulation_notifications(
 
 def _capture_real_screens(config: CaptureConfig) -> list[Path]:
     try:
-        from playwright.sync_api import sync_playwright
+        from playwright.sync_api import sync_playwright  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise DemoCaptureError(
             "Playwright is not installed. Install with `pip install playwright` and "
@@ -284,10 +302,14 @@ def _capture_real_screens(config: CaptureConfig) -> list[Path]:
     _resolve_all_triggered(base_url, config.admin_key, config.timeout_seconds)
 
     output_paths = [config.output_dir / filename for filename in SHOT_FILENAMES]
-    admin_url = f"{base_url}/admin?key={parse.quote(config.admin_key)}&refresh=120"
+    admin_url = f"{base_url}/admin?refresh=120"
 
-    alarm_primary = _trigger_alarm(base_url, DEMO_TOKENS["primary"], config.timeout_seconds)
-    alarm_secondary = _trigger_alarm(base_url, DEMO_TOKENS["secondary"], config.timeout_seconds)
+    alarm_primary = _trigger_alarm(
+        base_url, DEMO_TOKENS["primary"], config.timeout_seconds
+    )
+    alarm_secondary = _trigger_alarm(
+        base_url, DEMO_TOKENS["secondary"], config.timeout_seconds
+    )
     alarm_secondary_data = _get_alarm(
         base_url,
         config.admin_key,
@@ -303,6 +325,7 @@ def _capture_real_screens(config: CaptureConfig) -> list[Path]:
 
         desktop = browser.new_context(viewport={"width": 1440, "height": 900})
         page = desktop.new_page()
+        _login_admin_ui(page, base_url, config.admin_key)
 
         page.goto(f"{admin_url}&status=triggered", wait_until="networkidle")
         page.wait_for_selector("#alarm-search")
@@ -374,12 +397,16 @@ def _capture_real_screens(config: CaptureConfig) -> list[Path]:
         ack_page.wait_for_selector(".status-badge.acknowledged")
         ack_page.screenshot(path=str(output_paths[6]), full_page=True)
 
-        _resolve_alarm(base_url, config.admin_key, alarm_secondary, config.timeout_seconds)
+        _resolve_alarm(
+            base_url, config.admin_key, alarm_secondary, config.timeout_seconds
+        )
         page.goto(f"{admin_url}&status=resolved", wait_until="networkidle")
         page.wait_for_selector("tr.alarm-row")
         page.screenshot(path=str(output_paths[7]), full_page=True)
 
-        _wait_for_simulation_notifications(base_url, config.admin_key, config.wait_seconds)
+        _wait_for_simulation_notifications(
+            base_url, config.admin_key, config.wait_seconds
+        )
         page.goto(admin_url, wait_until="networkidle")
         page.wait_for_selector("#simulation-panel[data-enabled='true']")
         page.screenshot(path=str(output_paths[8]), full_page=True)
@@ -411,7 +438,9 @@ def run_capture(config: CaptureConfig) -> list[Path]:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Capture local Mock University demo screenshots.")
+    parser = argparse.ArgumentParser(
+        description="Capture local Mock University demo screenshots."
+    )
     parser.add_argument("--base-url", default="http://localhost:8080")
     parser.add_argument("--admin-key", default=None)
     parser.add_argument("--output-dir", default="docs/assets/screenshots")

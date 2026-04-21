@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import httpx
 from arq.connections import RedisSettings
+from arq.cron import cron
 
 from alarm_broker.connectors.mock import MockSendXmsClient, MockSignalClient, MockZammadClient
 from alarm_broker.connectors.sendxms import SendXmsClient, SendXmsConfig
@@ -16,6 +17,7 @@ from alarm_broker.worker.tasks import (
     alarm_state_changed,
     escalate,
     process_alarm_event,
+    recover_incomplete_alarm_events,
 )
 
 
@@ -96,4 +98,20 @@ class WorkerSettings:
     redis_settings = _LazyRedisSettings()
     on_startup = startup
     on_shutdown = shutdown
-    functions = [alarm_created, escalate, alarm_acked, alarm_state_changed, process_alarm_event]
+    functions = [
+        alarm_created,
+        escalate,
+        alarm_acked,
+        alarm_state_changed,
+        process_alarm_event,
+        recover_incomplete_alarm_events,
+    ]
+    cron_jobs = [
+        cron(
+            recover_incomplete_alarm_events,
+            minute=set(range(60)),
+            second=0,
+            run_at_startup=True,
+            job_id="recover-incomplete-alarm-events",
+        )
+    ]
