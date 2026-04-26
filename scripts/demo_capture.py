@@ -12,11 +12,13 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib import error, parse, request
+from urllib import error, parse
 
 try:
+    from scripts.http_utils import HttpResult, normalize_base_url, request_json
     from scripts.demo_prepare import DemoPrepareError, run_prepare
 except ModuleNotFoundError:  # pragma: no cover - direct script execution fallback
+    from http_utils import HttpResult, normalize_base_url, request_json
     from demo_prepare import DemoPrepareError, run_prepare
 
 SHOT_FILENAMES: list[str] = [
@@ -59,15 +61,8 @@ class CaptureConfig:
     mock_screens: bool
 
 
-@dataclass(frozen=True)
-class HttpResult:
-    status_code: int
-    body: str
-    json_body: dict[str, Any] | list[Any] | None
-
-
 def _normalize_base_url(base_url: str) -> str:
-    return base_url.rstrip("/")
+    return normalize_base_url(base_url)
 
 
 def _resolve_admin_key(cli_value: str | None) -> str:
@@ -86,28 +81,14 @@ def _http_json(
     body: bytes | None = None,
     timeout: float = 10.0,
 ) -> HttpResult:
-    req = request.Request(
-        url=url, data=body, method=method.upper(), headers=headers or {}
-    )
     try:
-        with request.urlopen(req, timeout=timeout) as response:  # noqa: S310
-            raw = response.read().decode("utf-8")
-            payload: dict[str, Any] | list[Any] | None = None
-            if raw.strip():
-                try:
-                    payload = json.loads(raw)
-                except json.JSONDecodeError:
-                    payload = None
-            return HttpResult(response.status, raw, payload)
-    except error.HTTPError as exc:
-        raw = exc.read().decode("utf-8")
-        payload: dict[str, Any] | list[Any] | None = None
-        if raw.strip():
-            try:
-                payload = json.loads(raw)
-            except json.JSONDecodeError:
-                payload = None
-        return HttpResult(exc.code, raw, payload)
+        return request_json(
+            method=method,
+            url=url,
+            headers=headers,
+            body=body,
+            timeout=timeout,
+        )
     except error.URLError as exc:
         raise DemoCaptureError(f"Request failed for {url}: {exc.reason}") from exc
 

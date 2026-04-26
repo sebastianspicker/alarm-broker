@@ -380,6 +380,103 @@ async def test_admin_seed_accepts_application_yaml_content_type(
     assert resp.status_code == 200
 
 
+async def test_admin_seed_invalid_content_length_returns_400(engine, seeded_db, fake_redis) -> None:
+    app = create_app(
+        settings=Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            redis_url="redis://fake/0",
+            base_url="http://localhost:8080",
+            admin_api_key="test-admin-key",
+            zammad_api_token="",
+            sendxms_enabled=False,
+            signal_enabled=False,
+        ),
+        injected_engine=engine,
+        injected_redis=fake_redis,
+    )
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/v1/admin/seed",
+                headers={
+                    "X-Admin-Key": "test-admin-key",
+                    "Content-Type": "application/json",
+                    "Content-Length": "not-a-number",
+                },
+                content=b"{}",
+            )
+
+    assert resp.status_code == 400
+
+
+async def test_admin_seed_negative_content_length_returns_400(
+    engine, seeded_db, fake_redis
+) -> None:
+    app = create_app(
+        settings=Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            redis_url="redis://fake/0",
+            base_url="http://localhost:8080",
+            admin_api_key="test-admin-key",
+            zammad_api_token="",
+            sendxms_enabled=False,
+            signal_enabled=False,
+        ),
+        injected_engine=engine,
+        injected_redis=fake_redis,
+    )
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/v1/admin/seed",
+                headers={
+                    "X-Admin-Key": "test-admin-key",
+                    "Content-Type": "application/json",
+                    "Content-Length": "-1",
+                },
+                content=b"{}",
+            )
+
+    assert resp.status_code == 400
+
+
+async def test_admin_seed_content_length_too_large_returns_413(
+    engine, seeded_db, fake_redis
+) -> None:
+    app = create_app(
+        settings=Settings(
+            database_url="sqlite+aiosqlite:///:memory:",
+            redis_url="redis://fake/0",
+            base_url="http://localhost:8080",
+            admin_api_key="test-admin-key",
+            zammad_api_token="",
+            sendxms_enabled=False,
+            signal_enabled=False,
+        ),
+        injected_engine=engine,
+        injected_redis=fake_redis,
+    )
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/v1/admin/seed",
+                headers={
+                    "X-Admin-Key": "test-admin-key",
+                    "Content-Type": "application/json",
+                    "Content-Length": str(1_048_576 + 1),
+                },
+                content=b"{}",
+            )
+
+    assert resp.status_code == 413
+
+
 async def test_policy_rejects_missing_target_references(engine, seeded_db, fake_redis) -> None:
     app = create_app(
         settings=Settings(

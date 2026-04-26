@@ -18,6 +18,25 @@ from alarm_broker.settings import Settings
 router = APIRouter(prefix="/v1/admin", dependencies=[Depends(require_admin)])
 
 
+def _validated_content_length(raw_value: str | None) -> int | None:
+    """Parse Content-Length header and reject malformed/negative values."""
+    if raw_value is None:
+        return None
+    try:
+        parsed = int(raw_value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid Content-Length header. Expected integer byte size.",
+        ) from exc
+    if parsed < 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid Content-Length header. Value must be non-negative.",
+        )
+    return parsed
+
+
 @router.post("/devices", status_code=status.HTTP_201_CREATED)
 async def admin_create_device(
     body: DeviceUpsertIn,
@@ -67,11 +86,11 @@ async def admin_seed(
     settings: Settings = Depends(get_app_settings),
 ) -> dict[str, str]:
     """Seed the database with devices, persons, rooms, and sites."""
-    content_length = request.headers.get("content-length")
-    if content_length and int(content_length) > 10 * 1024 * 1024:
+    content_length = _validated_content_length(request.headers.get("content-length"))
+    if content_length is not None and content_length > _MAX_SEED_BYTES:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="Request body too large. Maximum: 10 MB",
+            detail=f"Request body too large. Maximum: {_MAX_SEED_BYTES} bytes",
         )
     raw = await request.body()
     if len(raw) > _MAX_SEED_BYTES:

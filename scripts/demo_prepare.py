@@ -8,14 +8,17 @@ simulation notifications to create a deterministic baseline for screenshots.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib import error, request
+from urllib import error
+
+try:
+    from scripts.http_utils import HttpResult, normalize_base_url, request_json
+except ModuleNotFoundError:  # pragma: no cover - direct script execution fallback
+    from http_utils import HttpResult, normalize_base_url, request_json
 
 TRIGGER_TOKENS: list[tuple[str, str, str]] = [
     (
@@ -50,13 +53,6 @@ class DemoPrepareError(RuntimeError):
     """Typed error for demo preparation failures."""
 
 
-@dataclass(frozen=True)
-class HttpResult:
-    status_code: int
-    body: str
-    json_body: dict[str, Any] | list[Any] | None
-
-
 RequestFunc = Callable[[str, str, dict[str, str], bytes | None, float], HttpResult]
 
 
@@ -67,32 +63,20 @@ def _request_json(
     body: bytes | None = None,
     timeout: float = 10.0,
 ) -> HttpResult:
-    req = request.Request(url=url, data=body, method=method.upper(), headers=headers or {})
     try:
-        with request.urlopen(req, timeout=timeout) as response:  # noqa: S310
-            raw = response.read().decode("utf-8")
-            parsed: dict[str, Any] | list[Any] | None = None
-            if raw.strip():
-                try:
-                    parsed = json.loads(raw)
-                except json.JSONDecodeError:
-                    parsed = None
-            return HttpResult(status_code=response.status, body=raw, json_body=parsed)
-    except error.HTTPError as exc:
-        raw = exc.read().decode("utf-8")
-        parsed: dict[str, Any] | list[Any] | None = None
-        if raw.strip():
-            try:
-                parsed = json.loads(raw)
-            except json.JSONDecodeError:
-                parsed = None
-        return HttpResult(status_code=exc.code, body=raw, json_body=parsed)
+        return request_json(
+            method=method,
+            url=url,
+            headers=headers,
+            body=body,
+            timeout=timeout,
+        )
     except error.URLError as exc:
         raise DemoPrepareError(f"Failed to reach {url}: {exc.reason}") from exc
 
 
 def _normalize_base_url(base_url: str) -> str:
-    return base_url.rstrip("/")
+    return normalize_base_url(base_url)
 
 
 def _resolve_admin_key(cli_value: str | None) -> str:
