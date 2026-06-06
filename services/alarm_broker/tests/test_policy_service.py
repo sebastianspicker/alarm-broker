@@ -26,9 +26,7 @@ def _make_target(
     address: str = "+491234567890",
     enabled: bool = True,
 ) -> TargetIn:
-    return TargetIn(
-        id=target_id, label=label, channel=channel, address=address, enabled=enabled
-    )
+    return TargetIn(id=target_id, label=label, channel=channel, address=address, enabled=enabled)
 
 
 def _make_step(
