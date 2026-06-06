@@ -294,6 +294,7 @@ async def test_metrics_returns_prometheus_text_with_alarm_counts(
     engine, sessionmaker, seeded_db, fake_redis, settings
 ):
     """Metrics endpoint returns Prometheus text format including alarm counts."""
+    settings.admin_api_key = TEST_ADMIN_API_KEY
     alarm_id = uuid.uuid4()
 
     async with sessionmaker() as session:
