@@ -5,7 +5,7 @@ updates:
     schedule:
       interval: "weekly"
     groups:
-      actions:
+      github-actions:
         patterns:
           - "*"
 
@@ -14,7 +14,12 @@ updates:
     schedule:
       interval: "weekly"
     groups:
-      python-deps:
+      python-runtime:
+        dependency-type: "production"
+        patterns:
+          - "*"
+      python-dev:
+        dependency-type: "development"
         patterns:
           - "*"
 
