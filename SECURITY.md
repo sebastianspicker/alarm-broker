@@ -2,12 +2,12 @@
 
 ## Supported Versions
 
-We release patches for security vulnerabilities. The following versions are currently supported:
+We release patches for security vulnerabilities on the current release-candidate line. Older tagged releases are not maintained.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.2.x   | :white_check_mark: |
-| 0.1.x   | :x:                |
+| Version | Supported |
+| ------- | --------- |
+| Current default branch / release candidate | :white_check_mark: |
+| Older tags | :x: |
 
 ## Reporting a Vulnerability
 
@@ -19,7 +19,9 @@ If you discover a security vulnerability, please report it by creating a GitHub 
 
 - Admin API endpoints require a secure API key (`X-Admin-Key` header)
 - The browser-based admin UI uses a short-lived Redis-backed session cookie issued by `/admin/login`
-- Admin key must be configured via `ADMIN_API_KEY` environment variable
+- Configure the admin key through `ADMIN_API_KEY` by default. If an operator
+  explicitly selects another secret-injection mechanism, document and review
+  that exception while preserving the same fail-closed behavior.
 - `/metrics` is protected by the same admin API key requirement
 - Empty admin key fails closed: API endpoints reject access and admin login cannot establish a session
 
@@ -67,20 +69,26 @@ Example:
 WEBHOOK_ALLOWED_HOSTS=hooks.example.org,webhook.internal.example.org
 ```
 
-Wildcards are not supported. `ALLOW_HTTP_WEBHOOKS` still controls whether `http://` webhook URLs are accepted, but HTTP webhook hosts must also be allowlisted.
+Wildcards are disabled by default. Broader matching may be introduced when an
+operator explicitly requests it for a controlled deployment, documents the
+justification, implements explicit host validation, and obtains security-review
+confirmation of the SSRF impact. `ALLOW_HTTP_WEBHOOKS` still controls whether
+`http://` webhook URLs are accepted. Unless a reviewed deployment-specific
+policy replaces exact-host validation, HTTP delivery also requires the
+destination host in `WEBHOOK_ALLOWED_HOSTS`.
 
 ## Best Practices
 
 1. **Use HTTPS in production** - Configure a reverse proxy with TLS
 2. **Trust proxies explicitly** - Set `TRUSTED_PROXY_CIDRS` before relying on forwarded HTTPS or client IP headers
-2. **Generate strong API keys** - Use random keys with sufficient entropy:
+3. **Generate strong API keys** - Use random keys with sufficient entropy:
    ```bash
    python -c "import secrets; print(secrets.token_urlsafe(32))"
    ```
-3. **Restrict network access** - Use firewall rules to limit access to necessary IPs
-4. **Regular updates** - Keep dependencies up to date
-5. **Monitor logs** - Watch for unusual activity
-6. **Backup regularly** - Maintain database backups
+4. **Restrict network access** - Use firewall rules to limit access to necessary IPs
+5. **Regular updates** - Keep dependencies up to date
+6. **Monitor logs** - Watch for unusual activity
+7. **Backup regularly** - Maintain database backups
 
 ## Dependencies Security
 
