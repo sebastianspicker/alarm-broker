@@ -12,7 +12,6 @@ repos:
         name: public repository hygiene
         entry: python scripts/verify_public_hygiene.py
         language: system
-        pass_filenames: false
 
   # Ruff - Linting and formatting
   - repo: https://github.com/astral-sh/ruff-pre-commit

@@ -25,10 +25,7 @@ def _csrf(html: str) -> str:
     return match.group(1)
 
 
-async def test_named_session_csrf_action_and_rest_boundary(
-    engine, sessionmaker, seeded_db, fake_redis, settings
-) -> None:
-    settings.admin_api_key = TEST_ADMIN_API_KEY
+async def _seed_browser_alarm(sessionmaker) -> uuid.UUID:
     alarm_id = uuid.uuid4()
     async with sessionmaker() as session:
         session.add(
@@ -49,42 +46,56 @@ async def test_named_session_csrf_action_and_rest_boundary(
             )
         )
         await session.commit()
+    return alarm_id
+
+
+async def _exercise_browser_session(client: AsyncClient, alarm_id: uuid.UUID) -> None:
+    login = await client.post(
+        "/admin/login?lang=de",
+        data={"admin_key": TEST_ADMIN_API_KEY, "operator_name": "Leitstelle Nord"},
+        follow_redirects=False,
+    )
+    assert login.status_code == 303
+    detail = await client.get(f"/admin/alarms/{alarm_id}?lang=de")
+    assert detail.status_code == 200
+    assert "Leitstelle Nord" in detail.text
+    assert TEST_ADMIN_API_KEY not in detail.text
+
+    missing_csrf = await client.post(f"/admin/alarms/{alarm_id}/ack")
+    assert missing_csrf.status_code == 403
+    assert "Sicherheitsprüfung" in missing_csrf.text
+    acknowledged = await client.post(
+        f"/admin/alarms/{alarm_id}/ack",
+        data={"csrf_token": _csrf(detail.text)},
+        follow_redirects=False,
+    )
+    assert acknowledged.status_code == 303
+
+
+async def _check_rest_authentication_boundary(client: AsyncClient, alarm_id: uuid.UUID) -> None:
+    rest_without_key = await client.post(
+        f"/v1/alarms/{alarm_id}/resolve", json={"actor": "browser"}
+    )
+    assert rest_without_key.status_code == 401
+    rest_with_key = await client.post(
+        f"/v1/alarms/{alarm_id}/resolve",
+        json={"actor": "API"},
+        headers={"X-Admin-Key": TEST_ADMIN_API_KEY},
+    )
+    assert rest_with_key.status_code == 204
+
+
+async def test_named_session_csrf_action_and_rest_boundary(
+    engine, sessionmaker, seeded_db, fake_redis, settings
+) -> None:
+    settings.admin_api_key = TEST_ADMIN_API_KEY
+    alarm_id = await _seed_browser_alarm(sessionmaker)
 
     app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
     async with app.router.lifespan_context(app):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            login = await client.post(
-                "/admin/login?lang=de",
-                data={"admin_key": TEST_ADMIN_API_KEY, "operator_name": "Leitstelle Nord"},
-                follow_redirects=False,
-            )
-            assert login.status_code == 303
-            detail = await client.get(f"/admin/alarms/{alarm_id}?lang=de")
-            assert detail.status_code == 200
-            assert "Leitstelle Nord" in detail.text
-            assert TEST_ADMIN_API_KEY not in detail.text
-
-            missing_csrf = await client.post(f"/admin/alarms/{alarm_id}/ack")
-            assert missing_csrf.status_code == 403
-            assert "Sicherheitsprüfung" in missing_csrf.text
-
-            acknowledged = await client.post(
-                f"/admin/alarms/{alarm_id}/ack",
-                data={"csrf_token": _csrf(detail.text)},
-                follow_redirects=False,
-            )
-            assert acknowledged.status_code == 303
-
-            rest_without_key = await client.post(
-                f"/v1/alarms/{alarm_id}/resolve", json={"actor": "browser"}
-            )
-            assert rest_without_key.status_code == 401
-            rest_with_key = await client.post(
-                f"/v1/alarms/{alarm_id}/resolve",
-                json={"actor": "API"},
-                headers={"X-Admin-Key": TEST_ADMIN_API_KEY},
-            )
-            assert rest_with_key.status_code == 204
+            await _exercise_browser_session(client, alarm_id)
+            await _check_rest_authentication_boundary(client, alarm_id)
 
 
 async def test_locale_precedence_and_packaged_assets(

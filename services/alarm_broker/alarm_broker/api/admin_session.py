@@ -57,6 +57,24 @@ async def destroy_admin_session(redis, token: str | None) -> None:
         await _delete_fields(redis, token)
 
 
+async def _session_values(redis, token: str) -> tuple[object | None, object | None, object | None]:
+    return (
+        await redis.get(_key(token, "marker")),
+        await redis.get(_key(token, "operator")),
+        await redis.get(_key(token, "csrf")),
+    )
+
+
+async def _reject_session(redis, token: str, detail: str) -> None:
+    await _delete_fields(redis, token)
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
+
+
+async def _extend_session(redis, token: str) -> None:
+    for field in ("marker", "operator", "csrf"):
+        await redis.expire(_key(token, field), SESSION_TTL_SECONDS)
+
+
 async def require_admin_session(
     redis,
     settings: Settings,
@@ -72,20 +90,15 @@ async def require_admin_session(
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="login_required")
 
-    marker = await redis.get(_key(token, "marker"))
-    operator = await redis.get(_key(token, "operator"))
-    csrf_token = await redis.get(_key(token, "csrf"))
+    marker, operator, csrf_token = await _session_values(redis, token)
     if marker is None or operator is None or csrf_token is None:
-        await _delete_fields(redis, token)
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="session_expired")
+        await _reject_session(redis, token, "session_expired")
 
     if not secrets.compare_digest(str(marker), admin_key_marker(settings)):
-        await _delete_fields(redis, token)
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="session_invalid")
+        await _reject_session(redis, token, "session_invalid")
 
     if extend:
-        for field in ("marker", "operator", "csrf"):
-            await redis.expire(_key(token, field), SESSION_TTL_SECONDS)
+        await _extend_session(redis, token)
 
     return AdminSession(token=token, operator_name=str(operator), csrf_token=str(csrf_token))
 

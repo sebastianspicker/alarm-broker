@@ -24,7 +24,7 @@ package-check:
 	cd services/alarm_broker && python -m build --wheel
 
 hygiene-check:
-	python scripts/verify_public_hygiene.py
+	git ls-files --cached --others --exclude-standard -z | python scripts/verify_public_hygiene.py --null
 
 test-verbose:
 	cd services/alarm_broker && python -m pytest -v -m "not e2e" --cov=alarm_broker --cov-report=term-missing

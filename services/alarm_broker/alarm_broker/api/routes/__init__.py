@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from alarm_broker.api.routes.ack import router as ack_router
 from alarm_broker.api.routes.admin import router as admin_router
+from alarm_broker.api.routes.admin_configuration import router as admin_configuration_router
 from alarm_broker.api.routes.admin_ui import router as admin_ui_router
 from alarm_broker.api.routes.alarm_notes import router as alarm_notes_router
 from alarm_broker.api.routes.alarm_operations import router as alarm_operations_router
@@ -13,6 +14,7 @@ from alarm_broker.api.routes.yealink import router as yealink_router
 ALL_ROUTERS = [
     health_router,
     admin_ui_router,
+    admin_configuration_router,
     yealink_router,
     ack_router,
     alarms_router,

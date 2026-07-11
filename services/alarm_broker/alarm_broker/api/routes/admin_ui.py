@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import html
-import json
 import logging
 import secrets
 import uuid
@@ -36,7 +34,6 @@ from alarm_broker.api.deps import (
     is_secure_request,
 )
 from alarm_broker.api.i18n import SUPPORTED_LOCALES, normalise_locale, translation_context
-from alarm_broker.api.schemas import EscalationPolicyIn
 from alarm_broker.api.templating import render_template
 from alarm_broker.connectors.mock import get_mock_store
 from alarm_broker.core.rate_limit import minute_bucket, rate_limit_key
@@ -46,15 +43,9 @@ from alarm_broker.db.models import (
     AlarmNote,
     AlarmNotification,
     AlarmStatus,
-    Device,
-    EscalationPolicy,
-    EscalationStep,
-    EscalationTarget,
     Person,
     Room,
-    Site,
 )
-from alarm_broker.services.admin_audit import add_admin_audit_event
 from alarm_broker.services.alarm_service import (
     acknowledge_alarm,
     get_alarm_or_404,
@@ -64,9 +55,6 @@ from alarm_broker.services.event_service import (
     enqueue_alarm_acked_event,
     enqueue_alarm_state_changed_event,
 )
-from alarm_broker.services.master_data_lifecycle import require_current_version
-from alarm_broker.services.policy_service import apply_escalation_policy
-from alarm_broker.services.seed_service import apply_seed_payload, parse_seed_payload
 from alarm_broker.settings import Settings
 
 router = APIRouter()
@@ -398,13 +386,31 @@ async def admin_revision(
 
 
 async def _detail_context(session: AsyncSession, alarm: Alarm, locale: str) -> dict[str, Any]:
-    person = await session.get(Person, alarm.person_id) if alarm.person_id else None
-    room = await session.get(Room, alarm.room_id) if alarm.room_id else None
+    person = await _alarm_person(session, alarm)
+    room = await _alarm_room(session, alarm)
+    notes, notifications = await _alarm_history(session, alarm.id)
+    return {
+        "alarm": _alarm_detail_view(alarm, person, room),
+        "events": _alarm_timeline(alarm, locale, notes, notifications),
+    }
+
+
+async def _alarm_person(session: AsyncSession, alarm: Alarm) -> Person | None:
+    return await session.get(Person, alarm.person_id) if alarm.person_id else None
+
+
+async def _alarm_room(session: AsyncSession, alarm: Alarm) -> Room | None:
+    return await session.get(Room, alarm.room_id) if alarm.room_id else None
+
+
+async def _alarm_history(
+    session: AsyncSession, alarm_id: uuid.UUID
+) -> tuple[list[AlarmNote], list[AlarmNotification]]:
     notes = list(
         (
             await session.scalars(
                 select(AlarmNote)
-                .where(AlarmNote.alarm_id == alarm.id)
+                .where(AlarmNote.alarm_id == alarm_id)
                 .order_by(AlarmNote.created_at.asc())
             )
         ).all()
@@ -413,49 +419,62 @@ async def _detail_context(session: AsyncSession, alarm: Alarm, locale: str) -> d
         (
             await session.scalars(
                 select(AlarmNotification)
-                .where(AlarmNotification.alarm_id == alarm.id)
+                .where(AlarmNotification.alarm_id == alarm_id)
                 .order_by(AlarmNotification.created_at.asc())
             )
         ).all()
     )
-    events: list[dict[str, str]] = [
-        {
-            "at": alarm.created_at.isoformat(timespec="minutes"),
-            "at_iso": alarm.created_at.isoformat(),
-            "description": "Alarm created" if locale == "en" else "Alarm erstellt",
-        }
-    ]
-    events.extend(
-        {
-            "at": note.created_at.isoformat(timespec="minutes"),
-            "at_iso": note.created_at.isoformat(),
-            "description": f"{note.created_by or 'System'}: {note.note}",
-        }
-        for note in notes
-    )
-    events.extend(
-        {
-            "at": item.created_at.isoformat(timespec="minutes"),
-            "at_iso": item.created_at.isoformat(),
-            "description": f"{item.channel}: {item.result or 'pending'}",
-        }
-        for item in notifications
-    )
-    events.sort(key=lambda item: item["at_iso"])
+    return notes, notifications
+
+
+def _alarm_timeline(
+    alarm: Alarm,
+    locale: str,
+    notes: list[AlarmNote],
+    notifications: list[AlarmNotification],
+) -> list[dict[str, str]]:
+    events = [_created_event(alarm, locale)]
+    events.extend(_note_event(note) for note in notes)
+    events.extend(_notification_event(item) for item in notifications)
+    return sorted(events, key=lambda item: item["at_iso"])
+
+
+def _created_event(alarm: Alarm, locale: str) -> dict[str, str]:
     return {
-        "alarm": {
-            "id": str(alarm.id),
-            "short_id": str(alarm.id)[:8],
-            "status": alarm.status.value,
-            "created_at": alarm.created_at.isoformat(timespec="minutes"),
-            "person": person.display_name if person else alarm.person_id or "—",
-            "room": room.label if room else alarm.room_id or "—",
-            "source": alarm.source,
-            "severity": alarm.severity,
-            "can_ack": alarm.status == AlarmStatus.TRIGGERED,
-            "can_close": alarm.status in {AlarmStatus.TRIGGERED, AlarmStatus.ACKNOWLEDGED},
-        },
-        "events": events,
+        "at": alarm.created_at.isoformat(timespec="minutes"),
+        "at_iso": alarm.created_at.isoformat(),
+        "description": "Alarm created" if locale == "en" else "Alarm erstellt",
+    }
+
+
+def _note_event(note: AlarmNote) -> dict[str, str]:
+    return {
+        "at": note.created_at.isoformat(timespec="minutes"),
+        "at_iso": note.created_at.isoformat(),
+        "description": f"{note.created_by or 'System'}: {note.note}",
+    }
+
+
+def _notification_event(item: AlarmNotification) -> dict[str, str]:
+    return {
+        "at": item.created_at.isoformat(timespec="minutes"),
+        "at_iso": item.created_at.isoformat(),
+        "description": f"{item.channel}: {item.result or 'pending'}",
+    }
+
+
+def _alarm_detail_view(alarm: Alarm, person: Person | None, room: Room | None) -> dict[str, Any]:
+    return {
+        "id": str(alarm.id),
+        "short_id": str(alarm.id)[:8],
+        "status": alarm.status.value,
+        "created_at": alarm.created_at.isoformat(timespec="minutes"),
+        "person": person.display_name if person else alarm.person_id or "—",
+        "room": room.label if room else alarm.room_id or "—",
+        "source": alarm.source,
+        "severity": alarm.severity,
+        "can_ack": alarm.status == AlarmStatus.TRIGGERED,
+        "can_close": alarm.status in {AlarmStatus.TRIGGERED, AlarmStatus.ACKNOWLEDGED},
     }
 
 
@@ -687,61 +706,96 @@ async def admin_bulk_action(
     browser_session = await _action_session(request, settings, admin_session, csrf_token)
     form = await request.form()
     raw_ids = form.getlist("alarm_id")
-    if not raw_ids:
-        raise HTTPException(status_code=422, detail="selection_required")
-    if action == "cancel" and not (reason or "").strip():
-        raise HTTPException(status_code=422, detail="reason_required")
-    changed = unchanged = missing = 0
-    for raw_id in raw_ids[:500]:
-        try:
-            alarm_id = uuid.UUID(str(raw_id))
-        except ValueError:
-            missing += 1
-            continue
-        alarm = await session.get(Alarm, alarm_id)
-        if alarm is None or alarm.deleted_at is not None:
-            missing += 1
-            continue
-        try:
-            did_change = (
-                await acknowledge_alarm(
-                    session,
-                    alarm,
-                    acked_by=browser_session.operator_name,
-                    note=reason,
-                )
-                if action == "ack"
-                else await transition_alarm(
-                    session,
-                    alarm,
-                    target_status=(
-                        AlarmStatus.RESOLVED if action == "resolve" else AlarmStatus.CANCELLED
-                    ),
-                    actor=browser_session.operator_name,
-                    note=reason,
-                )
-            )
-        except Exception as exc:
-            is_conflict = (
-                getattr(exc, "status_code", None) == 409
-                or exc.__class__.__name__ == "ConflictError"
-            )
-            if is_conflict:
-                unchanged += 1
-                continue
-            raise
-        changed += int(did_change)
-        unchanged += int(not did_change)
+    _validate_bulk_request(action, reason, raw_ids)
+    alarm_ids, missing = _parse_alarm_ids(raw_ids)
+    changed, unchanged, newly_missing = await _apply_bulk_actions(
+        session,
+        alarm_ids,
+        action=action,
+        actor=browser_session.operator_name,
+        reason=reason,
+    )
+    missing += newly_missing
     await set_flash(
         get_redis(request), browser_session, "success", f"bulk_{changed}_{unchanged}_{missing}"
     )
     return RedirectResponse("/admin", status_code=303)
 
 
+def _validate_bulk_request(action: str, reason: str | None, raw_ids: list[Any]) -> None:
+    if not raw_ids:
+        raise HTTPException(status_code=422, detail="selection_required")
+    if action == "cancel" and not (reason or "").strip():
+        raise HTTPException(status_code=422, detail="reason_required")
+
+
+def _parse_alarm_ids(raw_ids: list[Any]) -> tuple[list[uuid.UUID], int]:
+    alarm_ids: list[uuid.UUID] = []
+    invalid = 0
+    for raw_id in raw_ids[:500]:
+        try:
+            alarm_ids.append(uuid.UUID(str(raw_id)))
+        except ValueError:
+            invalid += 1
+    return alarm_ids, invalid
+
+
+async def _apply_bulk_actions(
+    session: AsyncSession,
+    alarm_ids: list[uuid.UUID],
+    *,
+    action: str,
+    actor: str,
+    reason: str | None,
+) -> tuple[int, int, int]:
+    changed = unchanged = missing = 0
+    for alarm_id in alarm_ids:
+        alarm = await session.get(Alarm, alarm_id)
+        if alarm is None or alarm.deleted_at is not None:
+            missing += 1
+            continue
+        try:
+            did_change = await _apply_bulk_action(
+                session, alarm, action=action, actor=actor, reason=reason
+            )
+        except Exception as exc:
+            if _is_conflict(exc):
+                unchanged += 1
+                continue
+            raise
+        changed += int(did_change)
+        unchanged += int(not did_change)
+    return changed, unchanged, missing
+
+
+async def _apply_bulk_action(
+    session: AsyncSession,
+    alarm: Alarm,
+    *,
+    action: str,
+    actor: str,
+    reason: str | None,
+) -> bool:
+    if action == "ack":
+        return await acknowledge_alarm(session, alarm, acked_by=actor, note=reason)
+    target_status = AlarmStatus.RESOLVED if action == "resolve" else AlarmStatus.CANCELLED
+    return await transition_alarm(
+        session,
+        alarm,
+        target_status=target_status,
+        actor=actor,
+        note=reason,
+    )
+
+
+def _is_conflict(exc: Exception) -> bool:
+    return getattr(exc, "status_code", None) == 409 or exc.__class__.__name__ == "ConflictError"
+
+
 @router.get("/admin/export")
 async def admin_export(
     request: Request,
-    format: str = Query(default="csv", pattern="^(csv|json)$"),
+    export_format: str = Query(default="csv", alias="format", pattern="^(csv|json)$"),
     status_filter: str | None = Query(default=None, alias="status"),
     admin_session: str | None = Cookie(default=None),
     session: AsyncSession = Depends(get_session),
@@ -754,408 +808,11 @@ async def admin_export(
     return await export_alarms(
         AlarmExportQuery(
             status=AlarmStatus(status_filter) if status_filter else None,
-            format=ExportFormat(format),
+            format=ExportFormat(export_format),
             limit=2000,
         ),
         session,
     )
-
-
-_RESOURCE_MODELS: dict[str, Any] = {
-    "sites": Site,
-    "rooms": Room,
-    "people": Person,
-    "devices": Device,
-}
-_RESOURCE_FIELDS = {
-    "sites": ("name",),
-    "rooms": ("site_id", "label", "floor", "notes"),
-    "people": ("display_name", "role", "phone_mobile", "phone_ext"),
-    "devices": (
-        "vendor",
-        "model_family",
-        "mac",
-        "account_ext",
-        "device_token",
-        "person_id",
-        "room_id",
-    ),
-}
-
-
-def _resource_row(resource_name: str, item: Any) -> dict[str, Any]:
-    values: dict[str, Any] = {}
-    masked: dict[str, str] = {}
-    for field in _RESOURCE_FIELDS[resource_name]:
-        raw = getattr(item, field)
-        if field == "device_token":
-            values[field] = ""
-            masked[field] = "••••" + raw[-4:] if raw else "—"
-        else:
-            values[field] = raw or ""
-    return {
-        "id": item.id,
-        "version": item.version,
-        "active": item.active,
-        "values": values,
-        "masked": masked,
-    }
-
-
-@router.get("/admin/configuration/{resource_name}", response_class=HTMLResponse)
-async def admin_configuration_list(
-    resource_name: str,
-    request: Request,
-    lang: str | None = Query(default=None),
-    admin_session: str | None = Cookie(default=None),
-    session: AsyncSession = Depends(get_session),
-    settings: Settings = Depends(get_app_settings),
-) -> HTMLResponse:
-    if resource_name == "escalation":
-        return await admin_escalation_page(request, lang, admin_session, session, settings)
-    if resource_name == "import":
-        return await admin_import_page(request, lang, admin_session, settings)
-    if resource_name not in _RESOURCE_MODELS:
-        raise HTTPException(status_code=404, detail="configuration_page_not_found")
-    locale = _requested_locale(request, lang)
-    browser_session = await _session_from_request(request, settings, admin_session, extend=True)
-    model: Any = _RESOURCE_MODELS[resource_name]
-    items = list((await session.scalars(select(model).order_by(model.id))).all())
-    return _html(
-        request,
-        "admin_resources.html",
-        locale,
-        resource_name=resource_name,
-        fields=_RESOURCE_FIELDS[resource_name],
-        resources=[_resource_row(resource_name, item) for item in items],
-        save_action=f"/admin/configuration/{resource_name}/save",
-        csrf_token=browser_session.csrf_token,
-        operator_name=browser_session.operator_name,
-        logout_action="/admin/logout",
-    )
-
-
-@router.post("/admin/configuration/{resource_name}/save")
-async def admin_configuration_save(
-    resource_name: str,
-    request: Request,
-    csrf_token: str | None = Form(default=None),
-    resource_id: str = Form(..., min_length=1, max_length=200),
-    version: int | None = Form(default=None),
-    admin_session: str | None = Cookie(default=None),
-    session: AsyncSession = Depends(get_session),
-    settings: Settings = Depends(get_app_settings),
-) -> RedirectResponse:
-    if resource_name not in _RESOURCE_MODELS:
-        raise HTTPException(status_code=404, detail="configuration_page_not_found")
-    browser_session = await _action_session(request, settings, admin_session, csrf_token)
-    form = await request.form()
-    model: Any = _RESOURCE_MODELS[resource_name]
-    item: Any = await session.get(model, resource_id)
-    creating = item is None
-    if creating:
-        item = model(id=resource_id)
-        session.add(item)
-    elif version is None:
-        raise HTTPException(status_code=409, detail="version_required")
-    else:
-        require_current_version(item, version)
-
-    changed: dict[str, Any] = {}
-    for field in _RESOURCE_FIELDS[resource_name]:
-        submitted = str(form.get(field, "")).strip()
-        if field == "device_token" and not submitted and not creating:
-            continue
-        if creating and field == "device_token" and not submitted:
-            raise HTTPException(status_code=422, detail="device_token_required")
-        value: str | None = submitted or None
-        required_fields = {"name", "label", "display_name", "vendor", "model_family"}
-        if field in required_fields and value is None:
-            raise HTTPException(status_code=422, detail=f"{field}_required")
-        setattr(item, field, value)
-        changed[field] = value
-    item.active = str(form.get("active", "")).lower() in {"1", "true", "on", "yes"}
-    item.version = 1 if creating else item.version + 1
-    add_admin_audit_event(
-        session,
-        operator_name=browser_session.operator_name,
-        action="create" if creating else "update",
-        resource_type=resource_name,
-        resource_id=resource_id,
-        changed_fields={**changed, "active": item.active},
-        request_id=getattr(request.state, "request_id", None),
-    )
-    await session.commit()
-    await set_flash(get_redis(request), browser_session, "success", "saved")
-    return RedirectResponse(f"/admin/configuration/{resource_name}", status_code=303)
-
-
-async def _active_dependency_counts(
-    session: AsyncSession, resource_name: str, resource_id: str
-) -> dict[str, int]:
-    filters: dict[str, tuple[Any, Any]] = {
-        "sites": (Room.id, (Room.site_id == resource_id) & Room.active.is_(True)),
-        "rooms": (Device.id, (Device.room_id == resource_id) & Device.active.is_(True)),
-        "people": (Device.id, (Device.person_id == resource_id) & Device.active.is_(True)),
-    }
-    if resource_name not in filters:
-        return {}
-    column, condition = filters[resource_name]
-    count = int(await session.scalar(select(func.count(column)).where(condition)) or 0)
-    return {"active_dependencies": count}
-
-
-@router.post("/admin/configuration/{resource_name}/{resource_id}/deactivate")
-async def admin_configuration_deactivate(
-    resource_name: str,
-    resource_id: str,
-    request: Request,
-    csrf_token: str | None = Form(default=None),
-    version: int = Form(...),
-    admin_session: str | None = Cookie(default=None),
-    session: AsyncSession = Depends(get_session),
-    settings: Settings = Depends(get_app_settings),
-) -> RedirectResponse:
-    if resource_name not in _RESOURCE_MODELS:
-        raise HTTPException(status_code=404, detail="configuration_page_not_found")
-    browser_session = await _action_session(request, settings, admin_session, csrf_token)
-    item: Any = await session.get(_RESOURCE_MODELS[resource_name], resource_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail="resource_not_found")
-    require_current_version(item, version)
-    blockers = await _active_dependency_counts(session, resource_name, resource_id)
-    if any(blockers.values()):
-        raise HTTPException(status_code=409, detail=blockers)
-    item.active = False
-    item.version += 1
-    add_admin_audit_event(
-        session,
-        operator_name=browser_session.operator_name,
-        action="deactivate",
-        resource_type=resource_name,
-        resource_id=resource_id,
-        changed_fields={"active": False},
-        request_id=getattr(request.state, "request_id", None),
-    )
-    await session.commit()
-    return RedirectResponse(f"/admin/configuration/{resource_name}", status_code=303)
-
-
-async def _historical_dependency_count(
-    session: AsyncSession, resource_name: str, resource_id: str
-) -> int:
-    conditions: dict[str, list[tuple[Any, Any]]] = {
-        "sites": [(Room.id, Room.site_id == resource_id), (Alarm.id, Alarm.site_id == resource_id)],
-        "rooms": [
-            (Device.id, Device.room_id == resource_id),
-            (Alarm.id, Alarm.room_id == resource_id),
-        ],
-        "people": [
-            (Device.id, Device.person_id == resource_id),
-            (Alarm.id, Alarm.person_id == resource_id),
-        ],
-        "devices": [(Alarm.id, Alarm.device_id == resource_id)],
-    }
-    total = 0
-    for column, condition in conditions[resource_name]:
-        total += int(await session.scalar(select(func.count(column)).where(condition)) or 0)
-    return total
-
-
-@router.post("/admin/configuration/{resource_name}/{resource_id}/delete")
-async def admin_configuration_delete(
-    resource_name: str,
-    resource_id: str,
-    request: Request,
-    csrf_token: str | None = Form(default=None),
-    version: int = Form(...),
-    admin_session: str | None = Cookie(default=None),
-    session: AsyncSession = Depends(get_session),
-    settings: Settings = Depends(get_app_settings),
-) -> RedirectResponse:
-    if resource_name not in _RESOURCE_MODELS:
-        raise HTTPException(status_code=404, detail="configuration_page_not_found")
-    browser_session = await _action_session(request, settings, admin_session, csrf_token)
-    item: Any = await session.get(_RESOURCE_MODELS[resource_name], resource_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail="resource_not_found")
-    require_current_version(item, version)
-    if await _historical_dependency_count(session, resource_name, resource_id):
-        raise HTTPException(status_code=409, detail="resource_is_referenced_deactivate_instead")
-    if item.active:
-        raise HTTPException(status_code=409, detail="deactivate_before_delete")
-    await session.delete(item)
-    add_admin_audit_event(
-        session,
-        operator_name=browser_session.operator_name,
-        action="delete",
-        resource_type=resource_name,
-        resource_id=resource_id,
-        request_id=getattr(request.state, "request_id", None),
-    )
-    await session.commit()
-    return RedirectResponse(f"/admin/configuration/{resource_name}", status_code=303)
-
-
-@router.get("/admin/configuration/escalation", response_class=HTMLResponse)
-async def admin_escalation_page(
-    request: Request,
-    lang: str | None = Query(default=None),
-    admin_session: str | None = Cookie(default=None),
-    session: AsyncSession = Depends(get_session),
-    settings: Settings = Depends(get_app_settings),
-) -> HTMLResponse:
-    locale = _requested_locale(request, lang)
-    browser_session = await _session_from_request(request, settings, admin_session, extend=True)
-    policy = await session.get(EscalationPolicy, "default")
-    targets = list((await session.scalars(select(EscalationTarget))).all())
-    steps = list(
-        (
-            await session.scalars(
-                select(EscalationStep)
-                .where(EscalationStep.policy_id == "default")
-                .order_by(EscalationStep.step_no)
-            )
-        ).all()
-    )
-    payload = {
-        "policy_id": "default",
-        "name": policy.name if policy else "Default",
-        "targets": [
-            {
-                "id": item.id,
-                "label": item.label,
-                "channel": item.channel,
-                "address": "",
-                "enabled": item.enabled,
-            }
-            for item in targets
-        ],
-        "steps": [
-            {
-                "step_no": step.step_no,
-                "after_seconds": step.after_seconds,
-                "target_ids": [step.target_id],
-            }
-            for step in steps
-        ],
-    }
-    return _html(
-        request,
-        "admin_policy.html",
-        locale,
-        policy_json=json.dumps(payload, indent=2),
-        policy_version=policy.version if policy else 0,
-        csrf_token=browser_session.csrf_token,
-        operator_name=browser_session.operator_name,
-        logout_action="/admin/logout",
-    )
-
-
-@router.post("/admin/configuration/escalation")
-async def admin_escalation_save(
-    request: Request,
-    policy_json: str = Form(..., max_length=100_000),
-    version: int = Form(...),
-    csrf_token: str | None = Form(default=None),
-    admin_session: str | None = Cookie(default=None),
-    session: AsyncSession = Depends(get_session),
-    settings: Settings = Depends(get_app_settings),
-) -> RedirectResponse:
-    browser_session = await _action_session(request, settings, admin_session, csrf_token)
-    try:
-        body = EscalationPolicyIn.model_validate_json(policy_json)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail="invalid_policy") from exc
-    if body.policy_id != "default":
-        raise HTTPException(status_code=422, detail="only_default_policy_is_editable")
-    for target in body.targets:
-        if target.address:
-            continue
-        existing_target = await session.get(EscalationTarget, target.id)
-        if existing_target is None:
-            raise HTTPException(status_code=422, detail="new_target_address_required")
-        target.address = existing_target.address
-    current = await session.get(EscalationPolicy, "default")
-    if current is not None:
-        require_current_version(current, version)
-        current.version += 1
-    elif version != 0:
-        raise HTTPException(status_code=409, detail="policy_version_conflict")
-    add_admin_audit_event(
-        session,
-        operator_name=browser_session.operator_name,
-        action="update",
-        resource_type="escalation_policy",
-        resource_id="default",
-        changed_fields={"policy": body.model_dump(mode="json")},
-        request_id=getattr(request.state, "request_id", None),
-    )
-    await apply_escalation_policy(session, body)
-    return RedirectResponse("/admin/configuration/escalation", status_code=303)
-
-
-@router.get("/admin/configuration/import", response_class=HTMLResponse)
-async def admin_import_page(
-    request: Request,
-    lang: str | None = Query(default=None),
-    admin_session: str | None = Cookie(default=None),
-    settings: Settings = Depends(get_app_settings),
-) -> HTMLResponse:
-    locale = _requested_locale(request, lang)
-    browser_session = await _session_from_request(request, settings, admin_session, extend=True)
-    return _html(
-        request,
-        "admin_import.html",
-        locale,
-        csrf_token=browser_session.csrf_token,
-        operator_name=browser_session.operator_name,
-        logout_action="/admin/logout",
-        preview=None,
-        seed_text="",
-    )
-
-
-@router.post("/admin/configuration/import", response_class=HTMLResponse)
-async def admin_import_submit(
-    request: Request,
-    seed_text: str = Form(..., max_length=1_048_576),
-    action: str = Form(..., pattern="^(preview|apply)$"),
-    content_hash: str | None = Form(default=None),
-    csrf_token: str | None = Form(default=None),
-    admin_session: str | None = Cookie(default=None),
-    session: AsyncSession = Depends(get_session),
-    settings: Settings = Depends(get_app_settings),
-) -> Response:
-    locale = _requested_locale(request, None)
-    browser_session = await _action_session(request, settings, admin_session, csrf_token)
-    raw = seed_text.encode()
-    data = parse_seed_payload("application/x-yaml", raw)
-    digest = hashlib.sha256(raw).hexdigest()
-    if action == "preview":
-        return _html(
-            request,
-            "admin_import.html",
-            locale,
-            csrf_token=browser_session.csrf_token,
-            operator_name=browser_session.operator_name,
-            logout_action="/admin/logout",
-            preview={"hash": digest, "sections": sorted(data)},
-            seed_text=seed_text,
-        )
-    if content_hash is None or not secrets.compare_digest(content_hash, digest):
-        raise HTTPException(status_code=409, detail="import_preview_is_stale")
-    add_admin_audit_event(
-        session,
-        operator_name=browser_session.operator_name,
-        action="import",
-        resource_type="configuration",
-        resource_id=digest,
-        changed_fields={"content_hash": digest, "sections": sorted(data)},
-        request_id=getattr(request.state, "request_id", None),
-    )
-    await apply_seed_payload(session, data=data, settings=settings)
-    return RedirectResponse("/admin/configuration/import", status_code=303)
 
 
 @router.get("/admin/activity", response_class=HTMLResponse)

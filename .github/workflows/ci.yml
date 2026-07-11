@@ -27,7 +27,7 @@ jobs:
           cache: "pip"
 
       - name: Check public repository hygiene
-        run: python scripts/verify_public_hygiene.py
+        run: git ls-files --cached --others --exclude-standard -z | python scripts/verify_public_hygiene.py --null
 
       - name: Install dependencies
         run: |

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import fnmatch
 import os
-import subprocess
 import sys
 from pathlib import Path, PurePosixPath
 
@@ -131,29 +130,31 @@ PRIVATE_TEXT_MARKERS = (
 )
 
 
-def _repository_candidates() -> list[str]:
-    result = subprocess.run(
-        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
-        cwd=REPOSITORY_ROOT,
-        check=True,
-        capture_output=True,
-    )
-    candidates = (path for path in result.stdout.decode().split("\0") if path)
+def _candidate_paths(arguments: list[str]) -> list[str]:
+    if arguments == ["--null"]:
+        arguments = [
+            path for path in sys.stdin.buffer.read().decode().split("\0") if path
+        ]
     return sorted(
         path
-        for path in candidates
+        for path in arguments
         if (REPOSITORY_ROOT / path).exists() or (REPOSITORY_ROOT / path).is_symlink()
     )
 
 
-def _path_reason(relative_path: str) -> str | None:
-    path = PurePosixPath(relative_path)
-    basename = path.name
-
+def _prefix_reason(relative_path: str) -> str | None:
     if relative_path.startswith(FORBIDDEN_PREFIXES):
         return "local-only workspace or report path"
+    return None
+
+
+def _directory_reason(path: PurePosixPath) -> str | None:
     if FORBIDDEN_DIRECTORY_NAMES.intersection(path.parts[:-1]):
         return "generated dependency, cache, report, or build directory"
+    return None
+
+
+def _basename_reason(basename: str) -> str | None:
     if basename in FORBIDDEN_BASENAMES:
         return "local-only or credential filename"
     if basename.startswith(".env") and basename != ".env.example":
@@ -164,6 +165,10 @@ def _path_reason(relative_path: str) -> str | None:
         return "private key filename"
     if any(fnmatch.fnmatch(basename, pattern) for pattern in FORBIDDEN_NAME_PATTERNS):
         return "credential filename"
+    return None
+
+
+def _suffix_reason(relative_path: str, path: PurePosixPath) -> str | None:
     if path.suffix.lower() in FORBIDDEN_SUFFIXES:
         return "sensitive or generated file extension"
     if (
@@ -172,6 +177,16 @@ def _path_reason(relative_path: str) -> str | None:
     ):
         return "regenerated screenshot asset"
     return None
+
+
+def _path_reason(relative_path: str) -> str | None:
+    path = PurePosixPath(relative_path)
+    return (
+        _prefix_reason(relative_path)
+        or _directory_reason(path)
+        or _basename_reason(path.name)
+        or _suffix_reason(relative_path, path)
+    )
 
 
 def _content_reason(path: Path) -> str | None:
@@ -190,9 +205,9 @@ def _content_reason(path: Path) -> str | None:
     return None
 
 
-def main() -> int:
+def main(arguments: list[str] | None = None) -> int:
     violations: list[tuple[str, str]] = []
-    candidates = _repository_candidates()
+    candidates = _candidate_paths(sys.argv[1:] if arguments is None else arguments)
 
     for relative_path in candidates:
         reason = _path_reason(relative_path)

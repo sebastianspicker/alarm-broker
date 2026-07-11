@@ -1,5 +1,5 @@
 {% macro status_badge(status, t) -%}
-<span class="status status--{{ status|lower }}">{{ t(status|lower) }}</span>
+<span class="status status-{{ status|lower }}">{{ t(status|lower) }}</span>
 {%- endmacro %}
 
 {% macro language_select(locale, locales, t, action) -%}
@@ -13,5 +13,5 @@
 {%- endmacro %}
 
 {% macro responder_button(label, action, dialog_id='') -%}
-<button class="button button--primary responder-control" type="submit" form="{{ action }}"{% if dialog_id %} data-dialog-open="{{ dialog_id }}"{% endif %}>{{ label }}</button>
+<button class="button button-primary responder-control" type="submit" form="{{ action }}"{% if dialog_id %} data-dialog-open="{{ dialog_id }}"{% endif %}>{{ label }}</button>
 {%- endmacro %}
