@@ -20,7 +20,9 @@ If you discover a security vulnerability, please report it by creating a GitHub 
 
 - Admin API endpoints require a secure API key (`X-Admin-Key` header)
 - The browser-based admin UI uses a short-lived Redis-backed session cookie issued by `/admin/login`
-- Admin key must be configured via `ADMIN_API_KEY` environment variable
+- Configure the admin key through `ADMIN_API_KEY` by default. If an operator
+  explicitly selects another secret-injection mechanism, document and review
+  that exception while preserving the same fail-closed behavior.
 - `/metrics` is protected by the same admin API key requirement
 - Empty admin key fails closed: API endpoints reject access and admin login cannot establish a session
 
