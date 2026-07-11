@@ -22,6 +22,14 @@ def _contrast(first: str, second: str) -> float:
     return (brighter + 0.05) / (darker + 0.05)
 
 
+def _css_contains_hex(css: str, color: str) -> bool:
+    expanded = color.lower()
+    shortened = "#" + "".join(expanded[index] for index in (1, 3, 5))
+    if all(expanded[index] == expanded[index + 1] for index in (1, 3, 5)):
+        return expanded in css.lower() or shortened in css.lower()
+    return expanded in css.lower()
+
+
 def test_translation_catalogue_has_exact_key_parity() -> None:
     expected = set(CATALOGUE[SUPPORTED_LOCALES[0]])
     assert all(set(CATALOGUE[locale]) == expected for locale in SUPPORTED_LOCALES)
@@ -100,5 +108,5 @@ def test_text_and_action_tokens_meet_wcag_aa_contrast() -> None:
         ("#ffb4ab", "#192126"),
     ]
     for foreground, background in pairs:
-        assert foreground.lstrip("#") in css.lower()
+        assert _css_contains_hex(css, foreground)
         assert _contrast(foreground, background) >= 4.5

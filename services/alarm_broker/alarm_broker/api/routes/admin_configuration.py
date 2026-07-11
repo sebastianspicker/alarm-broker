@@ -313,18 +313,34 @@ def _apply_resource_form(
     changed: dict[str, Any] = {}
     for field in _RESOURCE_FIELDS[resource_name]:
         submitted = str(form.get(field, "")).strip()
-        if field == "device_token" and not submitted and not creating:
+        value = _resource_field_value(field, submitted, creating=creating)
+        if value is _RETAIN_EXISTING:
             continue
-        if field == "device_token" and not submitted:
-            raise HTTPException(status_code=422, detail="device_token_required")
-        value: str | None = submitted or None
-        if field in _REQUIRED_FIELDS and value is None:
-            raise HTTPException(status_code=422, detail=f"{field}_required")
         setattr(item, field, value)
         changed[field] = value
     item.active = str(form.get("active", "")).lower() in {"1", "true", "on", "yes"}
     item.version = 1 if creating else item.version + 1
     return {**changed, "active": item.active}
+
+
+_RETAIN_EXISTING = object()
+
+
+def _resource_field_value(field: str, submitted: str, *, creating: bool) -> str | None | object:
+    if field == "device_token":
+        return _device_token_value(submitted, creating=creating)
+    value = submitted or None
+    if field in _REQUIRED_FIELDS and value is None:
+        raise HTTPException(status_code=422, detail=f"{field}_required")
+    return value
+
+
+def _device_token_value(submitted: str, *, creating: bool) -> str | object:
+    if submitted:
+        return submitted
+    if not creating:
+        return _RETAIN_EXISTING
+    raise HTTPException(status_code=422, detail="device_token_required")
 
 
 @router.post("/admin/configuration/{resource_name}/save")
