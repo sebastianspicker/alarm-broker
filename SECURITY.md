@@ -2,8 +2,7 @@
 
 ## Supported Versions
 
-We release patches for security vulnerabilities on the current release-candidate
-line. Older tagged releases are not maintained.
+We release patches for security vulnerabilities on the current release-candidate line. Older tagged releases are not maintained.
 
 | Version | Supported |
 | ------- | --------- |
