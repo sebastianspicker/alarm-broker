@@ -68,11 +68,13 @@ Example:
 WEBHOOK_ALLOWED_HOSTS=hooks.example.org,webhook.internal.example.org
 ```
 
-Wildcards are not supported by default. If an operator needs broader matching
-for a controlled deployment, they must add an explicit host-validation change
-and review the SSRF impact before enabling it. `ALLOW_HTTP_WEBHOOKS` still
-controls whether `http://` webhook URLs are accepted, but HTTP webhook hosts
-must also be allowlisted.
+Wildcards are disabled by default. Broader matching may be introduced when an
+operator explicitly requests it for a controlled deployment, documents the
+justification, implements explicit host validation, and obtains security-review
+confirmation of the SSRF impact. `ALLOW_HTTP_WEBHOOKS` still controls whether
+`http://` webhook URLs are accepted. Unless a reviewed deployment-specific
+policy replaces exact-host validation, HTTP delivery also requires the
+destination host in `WEBHOOK_ALLOWED_HOSTS`.
 
 ## Best Practices
 
