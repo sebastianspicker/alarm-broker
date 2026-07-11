@@ -153,16 +153,6 @@ main,
   gap: .35rem .5rem;
 }
 
-.language-form label {
-  grid-column: 1 / -1;
-  margin: 0;
-}
-
-.language-form select {
-  width: auto;
-  margin: 0;
-}
-
 main {
   padding-block: 1.5rem 3rem;
 }
@@ -228,6 +218,16 @@ textarea {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: .3rem;
+}
+
+.language-form label {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.language-form select {
+  width: auto;
+  margin: 0;
 }
 
 input[type="checkbox"] {
@@ -404,7 +404,7 @@ dialog::backdrop {
   padding: 0;
   margin: -1px;
   overflow: hidden;
-  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
   white-space: nowrap;
   border: 0;
 }
@@ -421,14 +421,14 @@ dialog::backdrop {
     cursor: pointer;
   }
 
-  .admin-nav:not([open]) nav {
-    display: none;
-  }
-
   .admin-nav nav {
     display: grid;
     gap: .5rem;
     padding-block: .75rem;
+  }
+
+  .admin-nav:not([open]) nav {
+    display: none;
   }
 
   .filters {
