@@ -17,6 +17,11 @@ from alarm_broker.services.admin_audit import (
 )
 from alarm_broker.services.master_data_lifecycle import deactivate_resource, require_current_version
 
+try:
+    from tests.constants import value_for_test
+except ModuleNotFoundError:
+    from constants import value_for_test
+
 pytestmark = [pytest.mark.unit]
 
 
@@ -73,7 +78,7 @@ async def test_master_data_lifecycle_columns_default_to_active_version_one(
         person = Person(id="person-defaults", display_name="Defaults Person")
         device = Device(
             id="device-defaults",
-            device_token="defaults-token",
+            device_token=value_for_test("defaults-device"),
             person_id=person.id,
             room_id=room.id,
         )

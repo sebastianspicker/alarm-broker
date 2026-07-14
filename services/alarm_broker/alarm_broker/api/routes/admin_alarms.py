@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Cookie, Depends, Form, HTTPException, Query, Request
@@ -31,11 +30,12 @@ from alarm_broker.db.models import (
 from alarm_broker.services.alarm_service import (
     acknowledge_alarm,
     get_alarm_or_404,
+    soft_delete_alarm,
     transition_alarm,
 )
 from alarm_broker.services.event_service import (
-    enqueue_alarm_acked_event,
-    enqueue_alarm_state_changed_event,
+    dispatch_pending_alarm_events,
+    has_pending_alarm_events,
 )
 from alarm_broker.settings import Settings
 
@@ -167,23 +167,13 @@ async def admin_alarm_detail(
 
 async def _enqueue_state(
     request: Request,
+    session: AsyncSession,
     alarm: Alarm,
-    *,
-    ack: bool,
-    actor: str,
-    note: str | None,
 ) -> bool:
-    redis = get_redis(request)
-    success = True
-    if ack:
-        ack_result = await enqueue_alarm_acked_event(
-            redis, alarm_id=alarm.id, acked_by=actor, note=note, logger=logger
-        )
-        success = ack_result.success
-    state_result = await enqueue_alarm_state_changed_event(
-        redis, alarm_id=alarm.id, state=alarm.status.value, logger=logger
+    await dispatch_pending_alarm_events(
+        session, get_redis(request), logger=logger, alarm_id=alarm.id
     )
-    return success and state_result.success
+    return not await has_pending_alarm_events(session, alarm.id)
 
 
 @router.post("/admin/alarms/{alarm_id}/ack")
@@ -201,13 +191,7 @@ async def admin_ack_alarm(
     changed = await acknowledge_alarm(
         session, alarm, acked_by=browser_session.operator_name, note=note
     )
-    delivery_ok = (
-        await _enqueue_state(
-            request, alarm, ack=True, actor=browser_session.operator_name, note=note
-        )
-        if changed
-        else True
-    )
+    delivery_ok = await _enqueue_state(request, session, alarm) if changed else True
     await set_flash(
         get_redis(request),
         browser_session,
@@ -238,13 +222,7 @@ async def _transition_from_form(
         actor=browser_session.operator_name,
         note=(note or "").strip() or None,
     )
-    delivery_ok = (
-        await _enqueue_state(
-            request, alarm, ack=False, actor=browser_session.operator_name, note=note
-        )
-        if changed
-        else True
-    )
+    delivery_ok = await _enqueue_state(request, session, alarm) if changed else True
     await set_flash(
         get_redis(request), browser_session, "success" if delivery_ok else "warning", target.value
     )
@@ -325,17 +303,12 @@ async def admin_delete_alarm(
 ) -> RedirectResponse:
     browser_session = await _action_session(request, settings, admin_session, csrf_token)
     alarm = await get_alarm_or_404(session, alarm_id)
-    alarm.deleted_at = datetime.now(UTC)
-    alarm.deleted_by = browser_session.operator_name
-    session.add(
-        AlarmNote(
-            alarm_id=alarm.id,
-            note=reason.strip(),
-            created_by=browser_session.operator_name,
-            note_type="delete",
-        )
+    await soft_delete_alarm(
+        session,
+        alarm,
+        deleted_by=browser_session.operator_name,
+        note=reason.strip(),
     )
-    await session.commit()
     await set_flash(get_redis(request), browser_session, "success", "alarm_deleted")
     return RedirectResponse("/admin", status_code=303)
 
@@ -360,6 +333,7 @@ async def admin_bulk_action(
         action=action,
         actor=browser_session.operator_name,
         reason=reason,
+        request=request,
     )
     missing += newly_missing
     await set_flash(
@@ -393,6 +367,7 @@ async def _apply_bulk_actions(
     action: str,
     actor: str,
     reason: str | None,
+    request: Request,
 ) -> tuple[int, int, int]:
     changed = unchanged = missing = 0
     for alarm_id in alarm_ids:
@@ -409,9 +384,31 @@ async def _apply_bulk_actions(
                 unchanged += 1
                 continue
             raise
-        changed += int(did_change)
-        unchanged += int(not did_change)
+        if did_change:
+            changed += 1
+            await _enqueue_bulk_state(request, session, alarm)
+        else:
+            unchanged += 1
     return changed, unchanged, missing
+
+
+async def _enqueue_bulk_state(
+    request: Request,
+    session: AsyncSession,
+    alarm: Alarm,
+) -> None:
+    """Enqueue follow-up events after each independently committed bulk change."""
+    published = await dispatch_pending_alarm_events(
+        session, get_redis(request), logger=logger, alarm_id=alarm.id
+    )
+    if await has_pending_alarm_events(session, alarm.id):
+        logger.warning(
+            "bulk_event_delivery_pending",
+            extra={
+                "alarm_id": str(alarm.id),
+                "published": published,
+            },
+        )
 
 
 async def _apply_bulk_action(
@@ -442,7 +439,7 @@ def _is_conflict(exc: Exception) -> bool:
 async def admin_export(
     request: Request,
     export_format: str = Query(default="csv", alias="format", pattern="^(csv|json)$"),
-    status_filter: str | None = Query(default=None, alias="status"),
+    status_filter: AlarmStatus | None = Query(default=None, alias="status"),
     admin_session: str | None = Cookie(default=None),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_app_settings),
@@ -453,7 +450,7 @@ async def admin_export(
 
     return await export_alarms(
         AlarmExportQuery(
-            status=AlarmStatus(status_filter) if status_filter else None,
+            status=status_filter,
             format=ExportFormat(export_format),
             limit=2000,
         ),

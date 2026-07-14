@@ -7,10 +7,11 @@ import secrets
 import uuid
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Cookie, Depends, Form, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
-from sqlalchemy import String, cast, func, or_, select
+from sqlalchemy import String, and_, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alarm_broker import __version__
@@ -115,6 +116,46 @@ def _login_error(locale: str, kind: str) -> str:
     return messages[locale][kind]
 
 
+def _login_error_response(
+    request: Request, locale: str, kind: str, status_code: int
+) -> HTMLResponse:
+    return _html(
+        request,
+        "admin_login.html",
+        locale,
+        status_code=status_code,
+        login_action=f"/admin/login?lang={locale}",
+        error=_login_error(locale, kind),
+    )
+
+
+async def _login_rate_limited(redis, failure_key: str) -> bool:
+    attempts = await redis.get(failure_key)
+    return attempts is not None and int(attempts) >= _FAILED_LOGIN_LIMIT
+
+
+async def _record_login_failure(redis, failure_key: str) -> None:
+    count = await redis.incr(failure_key)
+    if count == 1:
+        await redis.expire(failure_key, _FAILED_LOGIN_WINDOW_SECONDS)
+
+
+def _login_success_response(
+    request: Request, locale: str, session_token: str, settings: Settings
+) -> Response:
+    response = RedirectResponse(f"/admin?lang={locale}", status_code=status.HTTP_303_SEE_OTHER)
+    response.set_cookie(
+        SESSION_COOKIE,
+        session_token,
+        httponly=True,
+        secure=is_secure_request(request, settings),
+        samesite="strict",
+        max_age=SESSION_TTL_SECONDS,
+    )
+    response.set_cookie("ui_locale", locale, max_age=31_536_000, samesite="lax")
+    return response
+
+
 async def _session_from_request(
     request: Request,
     settings: Settings,
@@ -150,54 +191,20 @@ async def admin_login_submit(
 ) -> Response:
     locale = _requested_locale(request, lang)
     if not settings.admin_api_key:
-        return _html(
-            request,
-            "admin_login.html",
-            locale,
-            status_code=500,
-            login_action=f"/admin/login?lang={locale}",
-            error=_login_error(locale, "config"),
-        )
+        return _login_error_response(request, locale, "config", 500)
 
     redis = get_redis(request)
     failure_key = _failed_login_key(request, settings)
-    attempts = await redis.get(failure_key)
-    if attempts is not None and int(attempts) >= _FAILED_LOGIN_LIMIT:
-        return _html(
-            request,
-            "admin_login.html",
-            locale,
-            status_code=429,
-            login_action=f"/admin/login?lang={locale}",
-            error=_login_error(locale, "rate"),
-        )
+    if await _login_rate_limited(redis, failure_key):
+        return _login_error_response(request, locale, "rate", 429)
     if not secrets.compare_digest(admin_key, settings.admin_api_key):
-        count = await redis.incr(failure_key)
-        if count == 1:
-            await redis.expire(failure_key, _FAILED_LOGIN_WINDOW_SECONDS)
-        return _html(
-            request,
-            "admin_login.html",
-            locale,
-            status_code=401,
-            login_action=f"/admin/login?lang={locale}",
-            error=_login_error(locale, "invalid"),
-        )
+        await _record_login_failure(redis, failure_key)
+        return _login_error_response(request, locale, "invalid", 401)
 
     await redis.delete(failure_key)
     named = operator_name.strip() or "Admin"
     browser_session = await create_admin_session(redis, settings, named)
-    response = RedirectResponse(f"/admin?lang={locale}", status_code=status.HTTP_303_SEE_OTHER)
-    response.set_cookie(
-        SESSION_COOKIE,
-        browser_session.token,
-        httponly=True,
-        secure=is_secure_request(request, settings),
-        samesite="strict",
-        max_age=SESSION_TTL_SECONDS,
-    )
-    response.set_cookie("ui_locale", locale, max_age=31_536_000, samesite="lax")
-    return response
+    return _login_success_response(request, locale, browser_session.token, settings)
 
 
 @router.post("/admin/logout")
@@ -224,17 +231,19 @@ async def admin_extend_session(
 ) -> RedirectResponse:
     browser_session = await _session_from_request(request, settings, admin_session, extend=True)
     validate_admin_csrf(browser_session, csrf_token)
-    return RedirectResponse("/admin", status_code=status.HTTP_303_SEE_OTHER)
+    response = RedirectResponse("/admin", status_code=status.HTTP_303_SEE_OTHER)
+    response.set_cookie(
+        SESSION_COOKIE,
+        browser_session.token,
+        httponly=True,
+        secure=is_secure_request(request, settings),
+        samesite="strict",
+        max_age=SESSION_TTL_SECONDS,
+    )
+    return response
 
 
-def _alarm_query(
-    status_filter: str | None,
-    search: str | None,
-    sort_by: str,
-    order: str,
-    cursor: uuid.UUID | None,
-    limit: int,
-):
+def _alarm_statement(status_filter: str | None, search: str | None):
     stmt = (
         select(Alarm, Person.display_name, Room.label)
         .outerjoin(Person, Person.id == Alarm.person_id)
@@ -254,17 +263,66 @@ def _alarm_query(
                 Room.label.ilike(pattern),
             )
         )
-    if cursor is not None:
-        stmt = stmt.where(Alarm.id < cursor if order == "desc" else Alarm.id > cursor)
+    return stmt
+
+
+def _sort_details(sort_by: str):
     sort_columns = {
         "status": Alarm.status,
         "severity": Alarm.severity,
         "created_at": Alarm.created_at,
     }
-    sort_column = sort_columns.get(sort_by, Alarm.created_at)
+    sort_name = sort_by if sort_by in sort_columns else "created_at"
+    return sort_name, sort_columns[sort_name]
+
+
+def _cursor_comparison(sort_column, cursor_alarm: Alarm, sort_name: str, order: str):
+    cursor_sort_value = getattr(cursor_alarm, sort_name)
+    if order == "desc":
+        return or_(
+            sort_column < cursor_sort_value,
+            and_(sort_column == cursor_sort_value, Alarm.id < cursor_alarm.id),
+        )
+    return or_(
+        sort_column > cursor_sort_value,
+        and_(sort_column == cursor_sort_value, Alarm.id > cursor_alarm.id),
+    )
+
+
+async def _apply_alarm_cursor(
+    session: AsyncSession, stmt, sort_column, sort_name: str, order: str, cursor: uuid.UUID | None
+):
+    if cursor is None:
+        return stmt
+    cursor_row = (await session.execute(stmt.where(Alarm.id == cursor))).first()
+    if cursor_row is None:
+        return stmt
+    return stmt.where(_cursor_comparison(sort_column, cursor_row[0], sort_name, order))
+
+
+async def _alarm_query(
+    session: AsyncSession,
+    status_filter: str | None,
+    search: str | None,
+    sort_by: str,
+    order: str,
+    cursor: uuid.UUID | None,
+    limit: int,
+):
+    stmt = _alarm_statement(status_filter, search)
+    sort_name, sort_column = _sort_details(sort_by)
+    stmt = await _apply_alarm_cursor(session, stmt, sort_column, sort_name, order, cursor)
     ordering = sort_column.desc() if order == "desc" else sort_column.asc()
     id_ordering = Alarm.id.desc() if order == "desc" else Alarm.id.asc()
     return stmt.order_by(ordering, id_ordering).limit(limit + 1)
+
+
+def _next_page_url(request: Request, cursor: uuid.UUID | None) -> str | None:
+    if cursor is None:
+        return None
+    query = [(key, value) for key, value in request.query_params.multi_items() if key != "cursor"]
+    query.append(("cursor", str(cursor)))
+    return f"{request.url.path}?{urlencode(query)}"
 
 
 async def _counts(session: AsyncSession) -> dict[str, int]:
@@ -334,10 +392,10 @@ async def admin_dashboard(
 ) -> HTMLResponse:
     locale = _requested_locale(request, lang)
     browser_session = await _session_from_request(request, settings, admin_session, extend=True)
-    statement = _alarm_query(status_filter, search, sort_by, order, cursor, limit)
+    statement = await _alarm_query(session, status_filter, search, sort_by, order, cursor, limit)
     result = list((await session.execute(statement)).all())
     page_rows = result[:limit]
-    next_cursor = str(page_rows[-1][0].id) if len(result) > limit and page_rows else None
+    next_cursor = page_rows[-1][0].id if len(result) > limit and page_rows else None
     flash = await pop_flash(get_redis(request), browser_session)
     return _html(
         request,
@@ -351,7 +409,7 @@ async def admin_dashboard(
         poll_url=f"/admin/revision?lang={locale}",
         poll_interval=15,
         revision=await _revision(session),
-        next_cursor=next_cursor,
+        next_page_url=_next_page_url(request, next_cursor),
         operator_name=browser_session.operator_name,
         logout_action="/admin/logout",
         csrf_token=browser_session.csrf_token,
