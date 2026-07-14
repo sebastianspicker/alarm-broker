@@ -45,6 +45,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    get_settings().validate_runtime_configuration()
     configuration = config.get_section(config.config_ini_section) or {}
     configuration["sqlalchemy.url"] = _sync_db_url()
 

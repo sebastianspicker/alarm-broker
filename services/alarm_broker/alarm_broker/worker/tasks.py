@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, TypedDict
 
@@ -21,11 +23,15 @@ from alarm_broker.connectors.zammad import ZammadClient
 from alarm_broker.core.metrics import record_event
 from alarm_broker.core.url_validation import (
     SSRFError,
+    pin_url_to_address,
+    redact_url_for_logging,
+    redact_url_in_text,
     validate_url_not_internal,
     validate_webhook_host_allowed,
 )
 from alarm_broker.db.models import Alarm, AlarmStatus
 from alarm_broker.services.enrichment_service import enrich_alarm_context
+from alarm_broker.services.event_service import dispatch_pending_alarm_events
 from alarm_broker.services.notification_service import NotificationService, log_notification
 from alarm_broker.services.trigger_service import TriggerService
 from alarm_broker.settings import Settings
@@ -43,6 +49,13 @@ class WorkerContext(TypedDict, total=False):
     zammad: ZammadClient
     sendxms: SendXmsClient
     signal: SignalClient
+
+
+@dataclass(frozen=True)
+class WebhookDelivery:
+    alarm_id: uuid.UUID
+    session: AsyncSession
+    state: str
 
 
 async def process_alarm_event(ctx: dict, payload: dict[str, Any]) -> None:
@@ -120,6 +133,9 @@ async def alarm_created(ctx: dict, alarm_id: str) -> None:
         if not alarm:
             logger.warning("alarm_not_found", extra={"alarm_id": alarm_id})
             return
+        if alarm.deleted_at is not None:
+            logger.info("alarm_deleted", extra={"alarm_id": alarm_id})
+            return
 
         enriched = await enrich_alarm_context(session, alarm)
 
@@ -186,6 +202,9 @@ async def escalate(ctx: dict, alarm_id: str, step_no: int) -> None:
         if not alarm:
             logger.warning("alarm_not_found", extra={"alarm_id": alarm_id, "step_no": step_no})
             return
+        if alarm.deleted_at is not None:
+            logger.info("alarm_deleted", extra={"alarm_id": alarm_id, "step_no": step_no})
+            return
 
         if alarm.status != AlarmStatus.TRIGGERED:
             logger.info(
@@ -247,6 +266,9 @@ async def alarm_acked(
         if not alarm:
             logger.warning("alarm_not_found", extra={"alarm_id": alarm_id})
             return
+        if alarm.deleted_at is not None:
+            logger.info("alarm_deleted", extra={"alarm_id": alarm_id})
+            return
 
         if not alarm.zammad_ticket_id:
             logger.warning(
@@ -300,7 +322,7 @@ async def _log_rejected_webhook(
         "webhook_url_rejected",
         extra={
             "alarm_id": alarm_id,
-            "webhook_url": webhook_url,
+            "webhook_url": redact_url_for_logging(webhook_url),
             "error": error,
         },
     )
@@ -323,10 +345,10 @@ async def _webhook_url_allowed(
     alarm_id: str,
     state: str,
     settings: Settings,
-) -> bool:
+) -> tuple[str, ...] | None:
     try:
         validate_webhook_host_allowed(settings.webhook_url, settings.webhook_allowed_hosts)
-        await validate_url_not_internal(settings.webhook_url)
+        addresses = await validate_url_not_internal(settings.webhook_url)
     except SSRFError as exc:
         await _log_rejected_webhook(
             session,
@@ -336,8 +358,8 @@ async def _webhook_url_allowed(
             webhook_url=settings.webhook_url,
             error=str(exc),
         )
-        return False
-    return True
+        return None
+    return tuple(addresses or ())
 
 
 def _webhook_headers(settings: Settings, payload_bytes: bytes) -> dict[str, str]:
@@ -378,14 +400,21 @@ async def alarm_state_changed(ctx: dict, alarm_id: str, state: str) -> None:
                 extra={"alarm_id": alarm_id, "state": state, "channel": "webhook"},
             )
             return
+        if alarm.deleted_at is not None:
+            logger.info(
+                "alarm_deleted",
+                extra={"alarm_id": alarm_id, "state": state, "channel": "webhook"},
+            )
+            return
 
-        if not await _webhook_url_allowed(
+        resolved_addresses = await _webhook_url_allowed(
             session,
             alarm=alarm,
             alarm_id=alarm_id,
             state=state,
             settings=settings,
-        ):
+        )
+        if resolved_addresses is None:
             return
 
         payload = _build_webhook_payload(alarm, state)
@@ -397,18 +426,16 @@ async def alarm_state_changed(ctx: dict, alarm_id: str, state: str) -> None:
             payload_bytes=payload_bytes,
             headers=_webhook_headers(settings, payload_bytes),
             timeout=settings.webhook_timeout_seconds,
-            alarm_id=alarm.id,
-            session=session,
-            state=state,
+            delivery=WebhookDelivery(alarm_id=alarm.id, session=session, state=state),
+            resolved_addresses=resolved_addresses,
         )
 
 
 async def recover_incomplete_alarm_events(ctx: dict) -> None:
-    """Periodically retry incomplete trigger-side event publication.
+    """Periodically retry durable lifecycle and trigger-side event publication.
 
-    This is a safety net for the gap between "alarm row committed" and
-    "initial worker jobs accepted by Redis". It only acts on
-    `alarm.meta.event_delivery` and does not change the alarm lifecycle.
+    This closes the gap between database commits and worker jobs accepted by
+    Redis. It does not change the alarm lifecycle.
     """
     sessionmaker = ctx["sessionmaker"]
     settings = ctx["settings"]
@@ -416,6 +443,12 @@ async def recover_incomplete_alarm_events(ctx: dict) -> None:
     batch_size = 500
 
     async with sessionmaker() as session:
+        published = await dispatch_pending_alarm_events(
+            session, redis, logger=logger, limit=batch_size
+        )
+        if published:
+            logger.info("alarm_event_outbox_recovered", extra={"published": published})
+
         trigger = TriggerService(session, redis, settings)
         offset = 0
 
@@ -477,11 +510,73 @@ def _build_webhook_payload(alarm: Alarm, state: str) -> dict[str, Any]:
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=0.2, max=2), reraise=True)
 async def _post_webhook(
-    http: Any, url: str, payload_bytes: bytes, headers: dict, timeout: float
+    http: Any,
+    url: str,
+    payload_bytes: bytes,
+    headers: dict,
+    timeout: float,
+    extensions: dict[str, Any] | None = None,
 ) -> None:
     """POST webhook with tenacity retry (3 attempts, exponential backoff)."""
-    response = await http.post(url, content=payload_bytes, headers=headers, timeout=float(timeout))
+    response = await http.post(
+        url,
+        content=payload_bytes,
+        headers=headers,
+        timeout=float(timeout),
+        extensions=extensions or {},
+    )
     response.raise_for_status()
+
+
+def _webhook_request_details(
+    webhook_url: str, headers: dict[str, str], resolved_address: str
+) -> tuple[str, dict[str, str], dict[str, Any]]:
+    """Pin one already-validated address while retaining the webhook's Host and SNI."""
+    request_headers = dict(headers)
+    request_url, host_header, sni_hostname = pin_url_to_address(webhook_url, resolved_address)
+    request_headers["Host"] = host_header
+    return request_url, request_headers, {"sni_hostname": sni_hostname}
+
+
+async def _post_state_webhook_to_validated_addresses(
+    http: Any,
+    webhook_url: str,
+    payload_bytes: bytes,
+    headers: dict[str, str],
+    timeout: float,
+    delivery: WebhookDelivery,
+    resolved_addresses: tuple[str, ...],
+) -> None:
+    """Post within one timeout budget, trying only prevalidated pinned addresses."""
+    last_error: Exception = SSRFError("Webhook URL has no validated global addresses")
+    async with asyncio.timeout(float(timeout)):
+        for address in resolved_addresses:
+            request_url, request_headers, request_extensions = _webhook_request_details(
+                webhook_url, headers, address
+            )
+            try:
+                await _post_webhook(
+                    http,
+                    request_url,
+                    payload_bytes,
+                    request_headers,
+                    timeout,
+                    request_extensions,
+                )
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "webhook_delivery_address_failed",
+                    extra={
+                        "alarm_id": str(delivery.alarm_id),
+                        "state": delivery.state,
+                        "url": redact_url_for_logging(webhook_url),
+                        "error": redact_url_in_text(str(exc), webhook_url),
+                    },
+                )
+                continue
+            return
+    raise last_error
 
 
 async def _send_webhook_with_retry(
@@ -490,34 +585,47 @@ async def _send_webhook_with_retry(
     payload_bytes: bytes,
     headers: dict[str, str],
     timeout: float,
-    alarm_id: uuid.UUID,
-    session: AsyncSession,
-    state: str,
+    delivery: WebhookDelivery,
+    resolved_addresses: tuple[str, ...] = (),
 ) -> None:
-    """Send webhook with retry and audit logging."""
+    """Send webhook with bounded retries on each validated global DNS address."""
     try:
-        await _post_webhook(http, webhook_url, payload_bytes, headers, timeout)
-        await log_notification(
-            session,
-            alarm_id=alarm_id,
-            channel="webhook",
-            target_id=None,
-            payload={"state": state},
-            result="ok",
+        await _post_state_webhook_to_validated_addresses(
+            http,
+            webhook_url,
+            payload_bytes,
+            headers,
+            timeout,
+            delivery,
+            resolved_addresses,
         )
-        record_event("webhook_delivery_ok")
     except Exception as exc:
-        logger.exception(
+        safe_error = redact_url_in_text(str(exc), webhook_url)
+        logger.error(
             "webhook_delivery_failed",
-            extra={"alarm_id": str(alarm_id), "state": state, "error": str(exc)},
+            extra={
+                "alarm_id": str(delivery.alarm_id),
+                "state": delivery.state,
+                "error": safe_error,
+            },
         )
         await log_notification(
-            session,
-            alarm_id=alarm_id,
+            delivery.session,
+            alarm_id=delivery.alarm_id,
             channel="webhook",
             target_id=None,
-            payload={"state": state},
+            payload={"state": delivery.state},
             result="error",
-            error=str(exc),
+            error=safe_error,
         )
         record_event("webhook_delivery_error")
+        return
+    await log_notification(
+        delivery.session,
+        alarm_id=delivery.alarm_id,
+        channel="webhook",
+        target_id=None,
+        payload={"state": delivery.state},
+        result="ok",
+    )
+    record_event("webhook_delivery_ok")

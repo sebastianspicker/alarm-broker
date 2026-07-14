@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 from dataclasses import dataclass
+from typing import NoReturn
 
 from fastapi import HTTPException, status
 
@@ -28,6 +29,18 @@ class AdminSession:
 
 def _key(token: str, field: str) -> str:
     return f"admin_session:{token}:{field}"
+
+
+def _redis_text(value: object) -> str | None:
+    """Return a Redis string reply without turning byte values into repr text."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    return None
 
 
 def admin_key_marker(settings: Settings) -> str:
@@ -65,7 +78,7 @@ async def _session_values(redis, token: str) -> tuple[object | None, object | No
     )
 
 
-async def _reject_session(redis, token: str, detail: str) -> None:
+async def _reject_session(redis, token: str, detail: str) -> NoReturn:
     await _delete_fields(redis, token)
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
 
@@ -73,6 +86,21 @@ async def _reject_session(redis, token: str, detail: str) -> None:
 async def _extend_session(redis, token: str) -> None:
     for field in ("marker", "operator", "csrf"):
         await redis.expire(_key(token, field), SESSION_TTL_SECONDS)
+
+
+def _has_missing_session_value(values: tuple[object | None, object | None, object | None]) -> bool:
+    return any(value is None for value in values)
+
+
+def _validated_session(
+    values: tuple[object | None, object | None, object | None], settings: Settings, token: str
+) -> AdminSession | None:
+    marker, operator, csrf_token = (_redis_text(value) for value in values)
+    if marker is None or operator is None or csrf_token is None:
+        return None
+    if not secrets.compare_digest(marker, admin_key_marker(settings)):
+        return None
+    return AdminSession(token=token, operator_name=operator, csrf_token=csrf_token)
 
 
 async def require_admin_session(
@@ -90,17 +118,18 @@ async def require_admin_session(
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="login_required")
 
-    marker, operator, csrf_token = await _session_values(redis, token)
-    if marker is None or operator is None or csrf_token is None:
+    values = await _session_values(redis, token)
+    if _has_missing_session_value(values):
         await _reject_session(redis, token, "session_expired")
 
-    if not secrets.compare_digest(str(marker), admin_key_marker(settings)):
+    session = _validated_session(values, settings, token)
+    if session is None:
         await _reject_session(redis, token, "session_invalid")
 
     if extend:
         await _extend_session(redis, token)
 
-    return AdminSession(token=token, operator_name=str(operator), csrf_token=str(csrf_token))
+    return session
 
 
 def validate_admin_csrf(session: AdminSession, submitted: str | None) -> None:
@@ -119,8 +148,9 @@ async def set_flash(redis, session: AdminSession, category: str, message_key: st
 
 async def pop_flash(redis, session: AdminSession) -> tuple[str, str] | None:
     key = _key(session.token, "flash")
-    value = await redis.get(key)
+    value = _redis_text(await redis.get(key))
     if value is None:
+        await redis.delete(key)
         return None
     await redis.delete(key)
     category, _, message_key = str(value).partition(":")

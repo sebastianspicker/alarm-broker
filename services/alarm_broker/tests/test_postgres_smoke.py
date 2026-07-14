@@ -5,16 +5,34 @@ try:
 except ModuleNotFoundError:
     from assertions import expect
 
+import asyncio
 import os
 import uuid
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from alarm_broker.api.main import create_app
-from alarm_broker.db.models import Alarm, AlarmStatus, Device, Person, Room, Site
+from alarm_broker.core.errors import ConflictError
+from alarm_broker.db.json_merge import merge_json_object
+from alarm_broker.db.models import (
+    Alarm,
+    AlarmEventOutbox,
+    AlarmNote,
+    AlarmStatus,
+    Device,
+    Person,
+    Room,
+    Site,
+)
 from alarm_broker.db.session import create_sessionmaker
+from alarm_broker.services.alarm_service import (
+    acknowledge_alarm,
+    soft_delete_alarm,
+    transition_alarm,
+)
 from alarm_broker.settings import Settings
 
 try:
@@ -107,4 +125,140 @@ async def test_postgres_trigger_and_ack_smoke() -> None:
         await _expect_postgres_alarm_acknowledged(sessionmaker, alarm_id)
     finally:
         await fake_redis.close()
+        await engine.dispose()
+
+
+def _postgres_alarm() -> Alarm:
+    return Alarm(
+        id=uuid.uuid4(),
+        status=AlarmStatus.TRIGGERED,
+        source="postgres-concurrency",
+        event="alarm.trigger",
+        severity="P0",
+        silent=True,
+        ack_token=f"pg-ack-{uuid.uuid4().hex}",
+        meta={},
+    )
+
+
+@pytest.mark.skipif("TEST_DATABASE_URL" not in os.environ, reason="TEST_DATABASE_URL not set")
+async def test_postgres_json_merge_preserves_object_shape_and_existing_keys() -> None:
+    engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
+    sessionmaker = create_sessionmaker(engine)
+    alarm = _postgres_alarm()
+    alarm.meta = {"request_id": "keep-me"}
+    try:
+        async with sessionmaker() as session:
+            session.add(alarm)
+            await session.commit()
+            await session.execute(
+                update(Alarm)
+                .where(Alarm.id == alarm.id)
+                .values(
+                    meta=merge_json_object(
+                        Alarm.meta,
+                        {"event_delivery": {"alarm_created_enqueued": True}},
+                        dialect_name=engine.dialect.name,
+                    )
+                )
+                .execution_options(synchronize_session=False)
+            )
+            await session.commit()
+            await session.refresh(alarm)
+
+        assert alarm.meta == {
+            "request_id": "keep-me",
+            "event_delivery": {"alarm_created_enqueued": True},
+        }
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.skipif("TEST_DATABASE_URL" not in os.environ, reason="TEST_DATABASE_URL not set")
+async def test_postgres_lifecycle_compare_and_set_has_one_winner() -> None:
+    engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
+    sessionmaker = create_sessionmaker(engine)
+    alarm = _postgres_alarm()
+    try:
+        async with sessionmaker() as session:
+            session.add(alarm)
+            await session.commit()
+
+        async with sessionmaker() as ack_session, sessionmaker() as resolve_session:
+            ack_alarm = await ack_session.get(Alarm, alarm.id)
+            resolve_alarm = await resolve_session.get(Alarm, alarm.id)
+            assert ack_alarm is not None
+            assert resolve_alarm is not None
+            results = await asyncio.gather(
+                acknowledge_alarm(ack_session, ack_alarm, acked_by="ack-winner"),
+                transition_alarm(
+                    resolve_session,
+                    resolve_alarm,
+                    target_status=AlarmStatus.RESOLVED,
+                    actor="resolve-winner",
+                ),
+                return_exceptions=True,
+            )
+
+        assert sum(result is True for result in results) == 1
+        assert sum(isinstance(result, ConflictError) for result in results) == 1
+        async with sessionmaker() as session:
+            persisted = await session.get(Alarm, alarm.id)
+            event_count = await session.scalar(
+                select(func.count())
+                .select_from(AlarmEventOutbox)
+                .where(AlarmEventOutbox.alarm_id == alarm.id)
+            )
+        assert persisted is not None
+        assert persisted.status in {AlarmStatus.ACKNOWLEDGED, AlarmStatus.RESOLVED}
+        assert event_count in {1, 2}
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.skipif("TEST_DATABASE_URL" not in os.environ, reason="TEST_DATABASE_URL not set")
+async def test_postgres_concurrent_soft_delete_records_one_winner() -> None:
+    engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
+    sessionmaker = create_sessionmaker(engine)
+    alarm = _postgres_alarm()
+    try:
+        async with sessionmaker() as session:
+            session.add(alarm)
+            await session.commit()
+
+        async with sessionmaker() as first_session, sessionmaker() as second_session:
+            first_alarm = await first_session.get(Alarm, alarm.id)
+            second_alarm = await second_session.get(Alarm, alarm.id)
+            assert first_alarm is not None
+            assert second_alarm is not None
+            results = await asyncio.gather(
+                soft_delete_alarm(
+                    first_session,
+                    first_alarm,
+                    deleted_by="first",
+                    note="first note",
+                ),
+                soft_delete_alarm(
+                    second_session,
+                    second_alarm,
+                    deleted_by="second",
+                    note="second note",
+                ),
+                return_exceptions=True,
+            )
+
+        assert sum(result is None for result in results) == 1
+        assert sum(isinstance(result, ConflictError) for result in results) == 1
+        async with sessionmaker() as session:
+            persisted = await session.get(Alarm, alarm.id)
+            notes = list(
+                (
+                    await session.scalars(select(AlarmNote).where(AlarmNote.alarm_id == alarm.id))
+                ).all()
+            )
+        assert persisted is not None
+        assert persisted.deleted_by in {"first", "second"}
+        assert len(notes) == 1
+        assert notes[0].created_by == persisted.deleted_by
+    finally:
         await engine.dispose()

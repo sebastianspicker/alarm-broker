@@ -19,6 +19,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Wheel smoke verification checks the actual Jinja templates and browser assets
 - API, health, and operator-system views now report the package version from one shared source
 
+### Fixed in Unreleased
+- Made lifecycle transitions compare-and-set safe and persisted their worker events through a transactional outbox with ordered recovery
+- Prevented webhook DNS rebinding, proxy bypass, malformed-URL crashes, and credential-bearing URL leakage in logs and audit rows
+- Corrected public and operator keyset pagination so filtered cursors and non-unique sort values cannot skip alarms
+- Replaced time-bucket trigger deduplication with a stable token-derived lease and stopped generated device IDs from embedding bearer tokens
+- Applied optimistic versions and parent/dependency locks consistently across browser, API, policy, and seed administration writes
+- Refreshed explicit admin-session cookie expiry and made HSTS honor forwarded HTTPS only from trusted proxies
+- Made Compose upgrades migration-first and made readiness fail closed until the database is at the single packaged Alembic head
+- Gated tag publication on main-branch ancestry, release metadata validation, reusable CI, and a migrated container readiness smoke test
+- Rejected enabled but incomplete connector configuration and reserved placeholder endpoints outside simulation mode
+- Made soft deletion atomic, suppressed queued work for deleted alarms, and based delivery status on remaining durable events instead of publish-count guesses
+- Failed API, worker, and online migration startup before using an implicit placeholder database password
+- Rejected negative, empty, or contradictory escalation schedules and made legacy schedule reads deterministic and fail closed
+- Disabled raw Uvicorn access logging and added bounded failover across validated webhook addresses without hostname fallback
+
 ### Removed
 - Unused settings/env examples for `SENDXMS_MODE`, `WEBHOOK_MAX_RETRIES`, `WEBHOOK_RETRY_DELAY_SECONDS`, and `SIMULATION_SEED_URL`
 - Dead `alarm.resolved` / `alarm.cancelled` event publisher helpers and no-op worker dispatch branches
@@ -42,7 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `services/message_formatter.py` (canonical location for alarm message formatting)
 - `services/metrics_queries.py` (DB queries for Prometheus metrics)
 
-### Changed
+### Changed in 0.2.0
 - Coverage threshold raised from 89% → 93% (actual: 93.48%)
 - `create_async_engine_from_url` accepts pool and slow-query-log parameters
 - `process_trigger` and `create_alarm` accept optional `request_id` for tracing

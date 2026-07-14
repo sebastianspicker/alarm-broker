@@ -10,10 +10,12 @@ except ModuleNotFoundError:
 import uuid
 from datetime import UTC, datetime
 
+import pytest
 from sqlalchemy import select
 
 from alarm_broker.connectors.mock import MockSendXmsClient, MockSignalClient, MockZammadClient
 from alarm_broker.connectors.zammad import ZammadConfig
+from alarm_broker.core.errors import ConfigurationError
 from alarm_broker.db.models import (
     Alarm,
     AlarmNotification,
@@ -115,6 +117,46 @@ async def _send_stage_zero_notifications(sessionmaker, alarm_id: uuid.UUID):
                 select(AlarmNotification).where(AlarmNotification.alarm_id == alarm_id)
             )
         ).all()
+
+
+async def test_escalation_schedule_rejects_legacy_conflicting_delays(sessionmaker) -> None:
+    service = _mock_notification_service()
+    async with sessionmaker() as session:
+        session.add(EscalationPolicy(id="legacy-conflict", name="Legacy Conflict"))
+        session.add_all(
+            [
+                EscalationTarget(
+                    id="legacy-a",
+                    label="Legacy A",
+                    channel="sms",
+                    address="+491111",
+                    enabled=True,
+                ),
+                EscalationTarget(
+                    id="legacy-b",
+                    label="Legacy B",
+                    channel="sms",
+                    address="+492222",
+                    enabled=True,
+                ),
+                EscalationStep(
+                    policy_id="legacy-conflict",
+                    step_no=1,
+                    after_seconds=60,
+                    target_id="legacy-a",
+                ),
+                EscalationStep(
+                    policy_id="legacy-conflict",
+                    step_no=1,
+                    after_seconds=120,
+                    target_id="legacy-b",
+                ),
+            ]
+        )
+        await session.commit()
+
+        with pytest.raises(ConfigurationError, match="conflicting delays"):
+            await service.get_escalation_schedule(session, "legacy-conflict")
 
 
 # ---------------------------------------------------------------------------

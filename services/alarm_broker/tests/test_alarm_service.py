@@ -11,14 +11,16 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from alarm_broker.core.errors import ConflictError, NotFoundError
-from alarm_broker.db.models import Alarm, AlarmStatus
+from alarm_broker.db.models import Alarm, AlarmEventOutbox, AlarmNote, AlarmStatus
 from alarm_broker.services.alarm_service import (
     acknowledge_alarm,
     get_alarm_by_ack_token,
     get_alarm_or_404,
+    soft_delete_alarm,
     transition_alarm,
 )
 
@@ -123,7 +125,7 @@ async def test_acknowledge_alarm_success(sessionmaker: async_sessionmaker, engin
 
 
 async def test_acknowledge_alarm_already_acknowledged(sessionmaker: async_sessionmaker, engine):
-    """Acknowledging an already-acknowledged alarm raises ConflictError."""
+    """Acknowledging an already-acknowledged alarm is an idempotent no-op."""
     alarm = _make_alarm(status=AlarmStatus.ACKNOWLEDGED)
 
     async with sessionmaker() as session:
@@ -132,8 +134,109 @@ async def test_acknowledge_alarm_already_acknowledged(sessionmaker: async_sessio
 
     async with sessionmaker() as session:
         persisted = await session.get(Alarm, alarm.id)
-        with pytest.raises(ConflictError, match="Cannot acknowledge"):
-            await acknowledge_alarm(session, persisted)
+        result = await acknowledge_alarm(session, persisted)
+
+    expect(result is False)
+
+
+async def test_stale_repeated_acknowledgement_reports_a_conflicting_winner(
+    sessionmaker: async_sessionmaker, engine
+):
+    alarm = _make_alarm(status=AlarmStatus.ACKNOWLEDGED)
+    async with sessionmaker() as session:
+        session.add(alarm)
+        await session.commit()
+
+    async with sessionmaker() as stale_session, sessionmaker() as winning_session:
+        stale_alarm = await stale_session.get(Alarm, alarm.id)
+        winning_alarm = await winning_session.get(Alarm, alarm.id)
+        assert await transition_alarm(
+            winning_session, winning_alarm, target_status=AlarmStatus.RESOLVED
+        )
+        with pytest.raises(ConflictError, match="concurrently"):
+            await acknowledge_alarm(stale_session, stale_alarm)
+
+
+async def test_soft_delete_wins_over_stale_lifecycle_transition(
+    sessionmaker: async_sessionmaker, engine
+):
+    """A lifecycle CAS cannot revive an alarm deleted by another session."""
+    alarm = _make_alarm(status=AlarmStatus.TRIGGERED)
+    async with sessionmaker() as session:
+        session.add(alarm)
+        await session.commit()
+
+    async with sessionmaker() as deleting_session, sessionmaker() as stale_session:
+        deleting_alarm = await deleting_session.get(Alarm, alarm.id)
+        stale_alarm = await stale_session.get(Alarm, alarm.id)
+        await soft_delete_alarm(deleting_session, deleting_alarm, deleted_by="operator-a")
+
+        with pytest.raises(NotFoundError):
+            await transition_alarm(
+                stale_session,
+                stale_alarm,
+                target_status=AlarmStatus.RESOLVED,
+                actor="operator-b",
+            )
+
+    async with sessionmaker() as session:
+        persisted = await session.get(Alarm, alarm.id)
+        expect(persisted is not None)
+        expect(persisted.deleted_at is not None)
+        expect(persisted.status == AlarmStatus.TRIGGERED)
+
+
+async def test_stale_soft_delete_records_only_winner_note_and_discards_pending_outbox(
+    sessionmaker: async_sessionmaker, engine
+):
+    """Concurrent deletes retain only the winner's actor/note in one transaction."""
+    alarm = _make_alarm(status=AlarmStatus.TRIGGERED)
+    async with sessionmaker() as session:
+        session.add(alarm)
+        session.add(
+            AlarmEventOutbox(
+                alarm_id=alarm.id,
+                event_type="alarm.state_changed",
+                payload={"new_state": "triggered"},
+            )
+        )
+        await session.commit()
+
+    async with sessionmaker() as winning_session, sessionmaker() as stale_session:
+        winning_alarm = await winning_session.get(Alarm, alarm.id)
+        stale_alarm = await stale_session.get(Alarm, alarm.id)
+        await soft_delete_alarm(
+            winning_session,
+            winning_alarm,
+            deleted_by="winner",
+            note="duplicate alert",
+        )
+        with pytest.raises(ConflictError, match="already been deleted"):
+            await soft_delete_alarm(
+                stale_session,
+                stale_alarm,
+                deleted_by="loser",
+                note="should not persist",
+            )
+
+    async with sessionmaker() as session:
+        persisted = await session.get(Alarm, alarm.id)
+        notes = list(
+            (await session.scalars(select(AlarmNote).where(AlarmNote.alarm_id == alarm.id))).all()
+        )
+        pending = list(
+            (
+                await session.scalars(
+                    select(AlarmEventOutbox).where(AlarmEventOutbox.alarm_id == alarm.id)
+                )
+            ).all()
+        )
+        expect(persisted is not None)
+        expect(persisted.deleted_by == "winner")
+        expect(len(notes) == 1)
+        expect(notes[0].created_by == "winner")
+        expect(notes[0].note == "duplicate alert")
+        expect(pending == [])
 
 
 async def test_acknowledge_alarm_resolved_raises_conflict(sessionmaker: async_sessionmaker, engine):
@@ -167,6 +270,111 @@ async def test_acknowledge_alarm_without_note(sessionmaker: async_sessionmaker, 
 
     expect(updated.status == AlarmStatus.ACKNOWLEDGED)
     expect("ack_note" not in updated.meta)
+
+
+async def _apply_lifecycle_action(
+    session,
+    alarm: Alarm,
+    action: str,
+) -> bool:
+    if action == "acknowledge":
+        return await acknowledge_alarm(session, alarm, acked_by="ack-actor", note="ack note")
+    if action == "resolve":
+        return await transition_alarm(
+            session,
+            alarm,
+            target_status=AlarmStatus.RESOLVED,
+            actor="resolve-actor",
+            note="resolve note",
+        )
+    return await transition_alarm(
+        session,
+        alarm,
+        target_status=AlarmStatus.CANCELLED,
+        actor="cancel-actor",
+        note="cancel note",
+    )
+
+
+@pytest.mark.parametrize(
+    ("winning_action", "losing_action", "expected_status", "winner_note", "loser_note"),
+    [
+        ("acknowledge", "resolve", AlarmStatus.ACKNOWLEDGED, "ack_note", "resolve_note"),
+        ("resolve", "cancel", AlarmStatus.RESOLVED, "resolve_note", "cancel_note"),
+        ("cancel", "acknowledge", AlarmStatus.CANCELLED, "cancel_note", "ack_note"),
+    ],
+)
+async def test_lifecycle_transition_compare_and_set_rejects_stale_session(
+    sessionmaker: async_sessionmaker,
+    engine,
+    winning_action: str,
+    losing_action: str,
+    expected_status: AlarmStatus,
+    winner_note: str,
+    loser_note: str,
+):
+    """Only one session loaded from TRIGGERED can persist its lifecycle transition."""
+    alarm = _make_alarm(status=AlarmStatus.TRIGGERED)
+
+    async with sessionmaker() as session:
+        session.add(alarm)
+        await session.commit()
+
+    async with sessionmaker() as winning_session, sessionmaker() as losing_session:
+        winning_alarm = await winning_session.get(Alarm, alarm.id)
+        losing_alarm = await losing_session.get(Alarm, alarm.id)
+
+        expect(winning_alarm.status == AlarmStatus.TRIGGERED)
+        expect(losing_alarm.status == AlarmStatus.TRIGGERED)
+        winner_changed = await _apply_lifecycle_action(
+            winning_session, winning_alarm, winning_action
+        )
+        with pytest.raises(ConflictError, match="changed concurrently"):
+            await _apply_lifecycle_action(losing_session, losing_alarm, losing_action)
+        expect(winner_changed is True)
+
+    async with sessionmaker() as session:
+        persisted = await session.get(Alarm, alarm.id)
+
+    expect(persisted.status == expected_status)
+    expect(persisted.meta.get(winner_note) is not None)
+    expect(loser_note not in persisted.meta)
+
+
+async def test_lifecycle_note_merge_preserves_concurrent_metadata(
+    sessionmaker: async_sessionmaker,
+    engine,
+):
+    """A stale lifecycle object must not replace metadata committed by another writer."""
+    alarm = _make_alarm(status=AlarmStatus.TRIGGERED)
+
+    async with sessionmaker() as session:
+        session.add(alarm)
+        await session.commit()
+
+    async with sessionmaker() as stale_session, sessionmaker() as metadata_session:
+        stale_alarm = await stale_session.get(Alarm, alarm.id)
+        current_alarm = await metadata_session.get(Alarm, alarm.id)
+        current_alarm.meta = {
+            "event_delivery": {
+                "alarm_created_enqueued": True,
+                "alarm_state_changed_enqueued": False,
+            }
+        }
+        await metadata_session.commit()
+
+        assert await acknowledge_alarm(
+            stale_session,
+            stale_alarm,
+            acked_by="metadata-safe",
+            note="preserve both",
+        )
+
+    async with sessionmaker() as session:
+        persisted = await session.get(Alarm, alarm.id)
+
+    expect(persisted.meta["ack_note"] == "preserve both")
+    expect(persisted.meta["event_delivery"]["alarm_created_enqueued"] is True)
 
 
 # ── transition_alarm ───────────────────────────────────────────────────

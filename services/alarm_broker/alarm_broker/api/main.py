@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from alarm_broker import __version__
+from alarm_broker.api.deps import is_secure_request
 from alarm_broker.api.routes import ALL_ROUTERS
 from alarm_broker.core.errors import (
     AlarmBrokerError,
@@ -79,6 +80,7 @@ def _lifespan(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         resolved_settings = settings or get_settings()
+        resolved_settings.validate_runtime_configuration()
         app.state.settings = resolved_settings
 
         engine = _build_engine(resolved_settings, injected_engine)
@@ -175,8 +177,8 @@ def _install_security_headers_middleware(app: FastAPI) -> None:
             "camera=(), geolocation=(), microphone=()",
         )
 
-        # HSTS header (only on HTTPS)
-        if request.url.scheme == "https":
+        # HSTS header on direct HTTPS or trusted TLS-terminating proxy requests.
+        if is_secure_request(request, request.app.state.settings):
             response.headers.setdefault(
                 "Strict-Transport-Security",
                 "max-age=31536000; includeSubDomains",

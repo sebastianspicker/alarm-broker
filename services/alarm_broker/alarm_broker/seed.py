@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from alarm_broker.core.errors import ValidationError
 from alarm_broker.db.models import (
     Device,
     EscalationPolicy,
@@ -16,6 +17,7 @@ from alarm_broker.db.models import (
     Room,
     Site,
 )
+from alarm_broker.services.master_data_lifecycle import lock_active_referenced_parents
 from alarm_broker.settings import Settings
 
 _ENV_PATTERN = re.compile(r"^\$\{([A-Z0-9_]+)\}$")
@@ -83,7 +85,9 @@ def _expand_env(value: Any, settings: Settings) -> Any:
 
 async def _upsert_sites(session: AsyncSession, sites: list[dict[str, Any]]) -> None:
     for site_data in sites:
-        site = await session.get(Site, site_data["id"])
+        site = await session.scalar(
+            select(Site).where(Site.id == site_data["id"]).with_for_update()
+        )
         if not site:
             session.add(
                 Site(
@@ -100,7 +104,15 @@ async def _upsert_sites(session: AsyncSession, sites: list[dict[str, Any]]) -> N
 
 async def _upsert_rooms(session: AsyncSession, rooms: list[dict[str, Any]]) -> None:
     for room_data in rooms:
-        room = await session.get(Room, room_data["id"])
+        active = _coerce_bool(room_data.get("active", True))
+        await lock_active_referenced_parents(
+            session,
+            resource_name="rooms",
+            values={"site_id": room_data["site_id"], "active": active},
+        )
+        room = await session.scalar(
+            select(Room).where(Room.id == room_data["id"]).with_for_update()
+        )
         if not room:
             session.add(
                 Room(
@@ -109,7 +121,7 @@ async def _upsert_rooms(session: AsyncSession, rooms: list[dict[str, Any]]) -> N
                     label=room_data["label"],
                     floor=room_data.get("floor"),
                     notes=room_data.get("notes"),
-                    active=_coerce_bool(room_data.get("active", True)),
+                    active=active,
                 )
             )
         else:
@@ -117,13 +129,15 @@ async def _upsert_rooms(session: AsyncSession, rooms: list[dict[str, Any]]) -> N
             room.label = room_data["label"]
             room.floor = room_data.get("floor")
             room.notes = room_data.get("notes")
-            room.active = _coerce_bool(room_data.get("active", True))
+            room.active = active
             room.version += 1
 
 
 async def _upsert_persons(session: AsyncSession, persons: list[dict[str, Any]]) -> None:
     for person_data in persons:
-        person = await session.get(Person, person_data["id"])
+        person = await session.scalar(
+            select(Person).where(Person.id == person_data["id"]).with_for_update()
+        )
         if not person:
             session.add(
                 Person(
@@ -146,8 +160,20 @@ async def _upsert_persons(session: AsyncSession, persons: list[dict[str, Any]]) 
 
 async def _upsert_devices(session: AsyncSession, devices: list[dict[str, Any]]) -> None:
     for device_data in devices:
+        active = _coerce_bool(device_data.get("active", True))
+        await lock_active_referenced_parents(
+            session,
+            resource_name="devices",
+            values={
+                "person_id": device_data.get("person_id"),
+                "room_id": device_data.get("room_id"),
+                "active": active,
+            },
+        )
         device = await session.scalar(
-            select(Device).where(Device.device_token == device_data["device_token"])
+            select(Device)
+            .where(Device.device_token == device_data["device_token"])
+            .with_for_update()
         )
         if not device:
             session.add(
@@ -160,7 +186,7 @@ async def _upsert_devices(session: AsyncSession, devices: list[dict[str, Any]]) 
                     device_token=device_data["device_token"],
                     person_id=device_data.get("person_id"),
                     room_id=device_data.get("room_id"),
-                    active=_coerce_bool(device_data.get("active", True)),
+                    active=active,
                 )
             )
         else:
@@ -170,17 +196,18 @@ async def _upsert_devices(session: AsyncSession, devices: list[dict[str, Any]]) 
             device.account_ext = device_data.get("account_ext")
             device.person_id = device_data.get("person_id")
             device.room_id = device_data.get("room_id")
-            device.active = _coerce_bool(device_data.get("active", True))
+            device.active = active
             device.version += 1
 
 
 async def _upsert_policy(session: AsyncSession, policy: dict[str, Any] | None) -> None:
     if policy:
-        esc_policy = await session.get(EscalationPolicy, policy.get("id", "default"))
+        policy_id = policy.get("id", "default")
+        esc_policy = await session.scalar(
+            select(EscalationPolicy).where(EscalationPolicy.id == policy_id).with_for_update()
+        )
         if not esc_policy:
-            session.add(
-                EscalationPolicy(id=policy.get("id", "default"), name=policy.get("name", "Default"))
-            )
+            session.add(EscalationPolicy(id=policy_id, name=policy.get("name", "Default")))
         else:
             esc_policy.name = policy.get("name", esc_policy.name)
             esc_policy.version += 1
@@ -188,7 +215,11 @@ async def _upsert_policy(session: AsyncSession, policy: dict[str, Any] | None) -
 
 async def _upsert_targets(session: AsyncSession, targets: list[dict[str, Any]]) -> None:
     for target_data in targets:
-        target = await session.get(EscalationTarget, target_data["id"])
+        target = await session.scalar(
+            select(EscalationTarget)
+            .where(EscalationTarget.id == target_data["id"])
+            .with_for_update()
+        )
         if not target:
             session.add(
                 EscalationTarget(
@@ -206,23 +237,60 @@ async def _upsert_targets(session: AsyncSession, targets: list[dict[str, Any]]) 
             target.enabled = _coerce_bool(target_data.get("enabled", True))
 
 
+def _normalise_seed_step(step: dict[str, Any]) -> tuple[str, int, int, list[str]]:
+    policy_id = str(step["policy_id"])
+    step_no = int(step["step_no"])
+    after_seconds = int(step["after_seconds"])
+    target_ids = [str(target_id) for target_id in step.get("target_ids") or []]
+    if not target_ids:
+        raise ValidationError(
+            f"Escalation policy {policy_id} step {step_no} must reference a target"
+        )
+    if step_no < 0 or after_seconds < 0:
+        raise ValidationError("Escalation step numbers and delays must be non-negative")
+    return policy_id, step_no, after_seconds, target_ids
+
+
+def _validated_seed_steps(
+    steps: list[dict[str, Any]],
+) -> list[tuple[str, int, int, list[str]]]:
+    delays_by_step: dict[tuple[str, int], int] = {}
+    normalised: list[tuple[str, int, int, list[str]]] = []
+    for step in steps:
+        values = _normalise_seed_step(step)
+        policy_id, step_no, after_seconds, _target_ids = values
+        schedule_key = (policy_id, step_no)
+        previous_delay = delays_by_step.setdefault(schedule_key, after_seconds)
+        if previous_delay != after_seconds:
+            raise ValidationError(
+                f"Conflicting after_seconds values for policy {policy_id} step {step_no}"
+            )
+        normalised.append(values)
+    return normalised
+
+
 async def _replace_escalation_steps(session: AsyncSession, steps: list[dict[str, Any]]) -> None:
+    normalised = _validated_seed_steps(steps)
+
     # Replace steps for policies included in the seed
-    policy_ids = sorted({step["policy_id"] for step in steps})
+    policy_ids = sorted({policy_id for policy_id, _step, _delay, _targets in normalised})
     for policy_id in policy_ids:
+        await session.scalar(
+            select(EscalationPolicy.id).where(EscalationPolicy.id == policy_id).with_for_update()
+        )
         existing = await session.scalars(
-            select(EscalationStep).where(EscalationStep.policy_id == policy_id)
+            select(EscalationStep).where(EscalationStep.policy_id == policy_id).with_for_update()
         )
         for row in existing:
             await session.delete(row)
 
-    for step in steps:
-        for target_id in step.get("target_ids") or []:
+    for policy_id, step_no, after_seconds, target_ids in normalised:
+        for target_id in target_ids:
             session.add(
                 EscalationStep(
-                    policy_id=step["policy_id"],
-                    step_no=int(step["step_no"]),
-                    after_seconds=int(step["after_seconds"]),
+                    policy_id=policy_id,
+                    step_no=step_no,
+                    after_seconds=after_seconds,
                     target_id=target_id,
                 )
             )
@@ -242,8 +310,8 @@ async def apply_seed(session: AsyncSession, raw: dict[str, Any], settings: Setti
     data = _expand_env(raw or {}, settings)
 
     await _upsert_sites(session, _seed_records(data, "sites"))
-    await _upsert_rooms(session, _seed_records(data, "rooms"))
     await _upsert_persons(session, _seed_records(data, "persons"))
+    await _upsert_rooms(session, _seed_records(data, "rooms"))
     await _upsert_devices(session, _seed_records(data, "devices"))
     await _upsert_policy(session, data.get("escalation_policy"))
     await _upsert_targets(session, _seed_records(data, "escalation_targets"))

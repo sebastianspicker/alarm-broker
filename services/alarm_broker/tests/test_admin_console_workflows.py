@@ -12,9 +12,15 @@ from alarm_broker.api.main import create_app
 from alarm_broker.db.models import Alarm, AlarmStatus, Site
 
 try:
-    from tests.constants import TEST_ADMIN_API_KEY, value_for_test
+    from tests.constants import TEST_ADMIN_API_KEY as _test_admin_api_key
+    from tests.constants import value_for_test as _value_for_test
 except ModuleNotFoundError:
-    from constants import TEST_ADMIN_API_KEY, value_for_test
+    from constants import TEST_ADMIN_API_KEY as _test_admin_api_key  # type: ignore[no-redef]
+    from constants import value_for_test as _value_for_test  # type: ignore[no-redef]
+
+
+TEST_ADMIN_API_KEY = _test_admin_api_key
+value_for_test = _value_for_test
 
 
 pytestmark = pytest.mark.integration
@@ -111,6 +117,27 @@ async def _run_alarm_workflow(client: AsyncClient, ids: list[uuid.UUID]) -> None
     assert (await client.get("/admin")).status_code == 401
 
 
+def _bulk_action_data(action: str, csrf_token: str, alarm_ids: tuple[uuid.UUID, ...]) -> dict:
+    return {
+        "csrf_token": csrf_token,
+        "action": action,
+        "reason": {"cancel": "False alarm"}.get(action, ""),
+        "alarm_id": [str(alarm_id) for alarm_id in alarm_ids],
+    }
+
+
+def _assert_bulk_event_jobs(fake_redis, alarm_ids, expected_events, expected_status: str) -> None:
+    payloads = [args[0] for name, args in fake_redis.jobs if name == "process_alarm_event"]
+    assert len(payloads) == len(alarm_ids) * len(expected_events)
+    assert [payload["event_type"] for payload in payloads] == expected_events * len(alarm_ids)
+    assert {payload["alarm_id"] for payload in payloads} == {
+        str(alarm_id) for alarm_id in alarm_ids
+    }
+    assert {payload["new_state"] for payload in payloads if "new_state" in payload} == {
+        expected_status
+    }
+
+
 async def test_alarm_detail_note_transitions_bulk_delete_and_session_controls(
     engine, sessionmaker, seeded_db, fake_redis, settings
 ) -> None:
@@ -122,6 +149,48 @@ async def test_alarm_detail_note_transitions_bulk_delete_and_session_controls(
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             await _login(client)
             await _run_alarm_workflow(client, ids)
+
+
+@pytest.mark.parametrize(
+    ("action", "expected_status", "expected_events"),
+    [
+        ("ack", "acknowledged", ["alarm.acknowledged", "alarm.state_changed"]),
+        ("resolve", "resolved", ["alarm.state_changed"]),
+        ("cancel", "cancelled", ["alarm.state_changed"]),
+    ],
+)
+async def test_bulk_actions_enqueue_followup_events_for_each_changed_alarm(
+    engine, sessionmaker, seeded_db, fake_redis, settings, action, expected_status, expected_events
+) -> None:
+    settings.admin_api_key = TEST_ADMIN_API_KEY
+    alarm_ids = (await _seed_workflow_alarms(sessionmaker))[:2]
+    app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
+
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            await _login(client)
+            worklist = await client.get("/admin")
+            response = await client.post(
+                "/admin/alarms/bulk",
+                data=_bulk_action_data(action, _hidden(worklist.text, "csrf_token"), alarm_ids),
+                follow_redirects=False,
+            )
+
+    assert response.status_code == 303
+    _assert_bulk_event_jobs(fake_redis, alarm_ids, expected_events, expected_status)
+
+
+async def test_admin_export_rejects_invalid_status(engine, seeded_db, fake_redis, settings) -> None:
+    settings.admin_api_key = TEST_ADMIN_API_KEY
+    app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
+
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            await _login(client)
+            response = await client.get("/admin/export?status=bogus")
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["query", "status"]
 
 
 async def _manage_site_and_import_configuration(client: AsyncClient) -> None:

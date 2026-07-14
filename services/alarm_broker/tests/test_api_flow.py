@@ -113,7 +113,7 @@ async def test_rate_limit_applies_only_to_new_alarms(
     settings.simulation_enabled = False
     app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
 
-    buckets = iter([1, 2])
+    buckets = iter([1, 2, 3])
     monkeypatch.setattr("alarm_broker.api.routes.yealink.bucket_10s", lambda: next(buckets))
     monkeypatch.setattr("alarm_broker.api.routes.yealink.minute_bucket", lambda: 999)
 
@@ -124,4 +124,11 @@ async def test_rate_limit_applies_only_to_new_alarms(
             expect(r1.status_code == 200)
 
             r2 = await client.get("/v1/yealink/alarm", params={"token": TEST_DEVICE_TOKEN})
-            expect(r2.status_code == 429)
+            expect(r2.status_code == 200)
+            expect(r2.json()["alarm_id"] == r1.json()["alarm_id"])
+
+            fake_redis.advance(31)
+            rate_limited = await client.get(
+                "/v1/yealink/alarm", params={"token": TEST_DEVICE_TOKEN}
+            )
+            expect(rate_limited.status_code == 429)

@@ -8,6 +8,7 @@ except ModuleNotFoundError:
     from assertions import expect
 
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -239,6 +240,44 @@ async def test_duplicate_step_target_pair_across_steps_raises_validation_error(
     async with sessionmaker() as session:
         with pytest.raises(ValidationError, match="Duplicate step/target pair"):
             await apply_escalation_policy(session, body)
+
+
+async def test_conflicting_delays_for_same_step_raise_validation_error(
+    sessionmaker: async_sessionmaker, engine
+) -> None:
+    body = EscalationPolicyIn(
+        policy_id="pol-conflicting-delay",
+        name="Conflicting Delay",
+        targets=[
+            _make_target(target_id="tgt-a"),
+            _make_target(target_id="tgt-b"),
+        ],
+        steps=[
+            _make_step(step_no=1, after_seconds=60, target_ids=["tgt-a"]),
+            _make_step(step_no=1, after_seconds=120, target_ids=["tgt-b"]),
+        ],
+    )
+
+    async with sessionmaker() as session:
+        with pytest.raises(ValidationError, match="Conflicting after_seconds"):
+            await apply_escalation_policy(session, body)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"step_no": -1, "after_seconds": 60},
+        {"step_no": 1, "after_seconds": -1},
+    ],
+)
+def test_step_schema_rejects_negative_schedule_values(values: dict[str, int]) -> None:
+    with pytest.raises(PydanticValidationError):
+        StepIn(**values, target_ids=["tgt-a"])
+
+
+def test_step_schema_rejects_empty_targets() -> None:
+    with pytest.raises(PydanticValidationError):
+        StepIn(step_no=1, after_seconds=60, target_ids=[])
 
 
 # ── Validation: missing target references ────────────────────────────

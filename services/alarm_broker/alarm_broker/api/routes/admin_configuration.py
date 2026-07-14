@@ -9,7 +9,8 @@ from typing import Any
 
 from fastapi import APIRouter, Cookie, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alarm_broker.api.deps import get_app_settings, get_redis, get_session
@@ -20,6 +21,7 @@ from alarm_broker.api.routes.admin_ui import (
     _session_from_request,
 )
 from alarm_broker.api.schemas import EscalationPolicyIn
+from alarm_broker.core.errors import ConflictError
 from alarm_broker.db.models import (
     Alarm,
     Device,
@@ -31,7 +33,7 @@ from alarm_broker.db.models import (
     Site,
 )
 from alarm_broker.services.admin_audit import add_admin_audit_event
-from alarm_broker.services.master_data_lifecycle import require_current_version
+from alarm_broker.services.master_data_lifecycle import lock_active_referenced_parents
 from alarm_broker.services.policy_service import apply_escalation_policy
 from alarm_broker.services.seed_service import apply_seed_payload, parse_seed_payload
 from alarm_broker.settings import Settings
@@ -58,7 +60,18 @@ _RESOURCE_FIELDS = {
         "room_id",
     ),
 }
-_REQUIRED_FIELDS = frozenset({"name", "label", "display_name", "vendor", "model_family"})
+_REQUIRED_FIELDS = frozenset({"name", "site_id", "label", "display_name", "vendor", "model_family"})
+
+
+def _mutation_applied(result: Any) -> bool:
+    return bool(result.rowcount)
+
+
+def _raise_version_conflict(resource_id: str) -> None:
+    raise ConflictError(
+        "Resource has changed since it was loaded",
+        details={"resource_id": resource_id},
+    )
 
 
 def _resource_model(resource_name: str) -> Any:
@@ -159,15 +172,6 @@ async def _retain_masked_target_addresses(session: AsyncSession, body: Escalatio
         target.address = existing_target.address
 
 
-def _validate_policy_version(current: EscalationPolicy | None, version: int) -> None:
-    if current is not None:
-        require_current_version(current, version)
-        current.version += 1
-        return
-    if version != 0:
-        raise HTTPException(status_code=409, detail="policy_version_conflict")
-
-
 @router.post("/admin/configuration/escalation")
 async def admin_escalation_save(
     request: Request,
@@ -186,7 +190,6 @@ async def admin_escalation_save(
     if body.policy_id != "default":
         raise HTTPException(status_code=422, detail="only_default_policy_is_editable")
     await _retain_masked_target_addresses(session, body)
-    _validate_policy_version(await session.get(EscalationPolicy, "default"), version)
     add_admin_audit_event(
         session,
         operator_name=browser_session.operator_name,
@@ -196,7 +199,7 @@ async def admin_escalation_save(
         changed_fields={"policy": body.model_dump(mode="json")},
         request_id=getattr(request.state, "request_id", None),
     )
-    await apply_escalation_policy(session, body)
+    await apply_escalation_policy(session, body, expected_version=version)
     return RedirectResponse("/admin/configuration/escalation", status_code=303)
 
 
@@ -290,37 +293,68 @@ async def admin_configuration_list(
     )
 
 
-async def _load_edit_item(
-    session: AsyncSession,
-    model: Any,
-    resource_id: str,
-    version: int | None,
-) -> tuple[Any, bool]:
-    item = await session.get(model, resource_id)
-    if item is None:
-        item = model(id=resource_id)
-        session.add(item)
-        return item, True
-    if version is None:
-        raise HTTPException(status_code=409, detail="version_required")
-    require_current_version(item, version)
-    return item, False
-
-
-def _apply_resource_form(
-    item: Any, resource_name: str, form: Any, *, creating: bool
-) -> dict[str, Any]:
+def _resource_form_values(resource_name: str, form: Any, *, creating: bool) -> dict[str, Any]:
     changed: dict[str, Any] = {}
     for field in _RESOURCE_FIELDS[resource_name]:
         submitted = str(form.get(field, "")).strip()
         value = _resource_field_value(field, submitted, creating=creating)
         if value is _RETAIN_EXISTING:
             continue
-        setattr(item, field, value)
         changed[field] = value
-    item.active = str(form.get("active", "")).lower() in {"1", "true", "on", "yes"}
-    item.version = 1 if creating else item.version + 1
-    return {**changed, "active": item.active}
+    changed["active"] = str(form.get("active", "")).lower() in {"1", "true", "on", "yes"}
+    return changed
+
+
+async def _create_resource(
+    session: AsyncSession, model: Any, resource_id: str, values: dict[str, Any]
+) -> None:
+    session.add(model(id=resource_id, **values))
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise ConflictError(
+            "Resource has changed since it was loaded",
+            details={"resource_id": resource_id},
+        ) from exc
+
+
+async def _update_resource_if_current(
+    session: AsyncSession,
+    model: Any,
+    resource_id: str,
+    version: int,
+    values: dict[str, Any],
+) -> None:
+    result = await session.execute(
+        update(model)
+        .where(model.id == resource_id, model.version == version)
+        .values(**values, version=model.version + 1)
+    )
+    if not _mutation_applied(result):
+        _raise_version_conflict(resource_id)
+
+
+async def _deactivate_resource_if_current(
+    session: AsyncSession, model: Any, resource_id: str, version: int
+) -> None:
+    result = await session.execute(
+        update(model)
+        .where(model.id == resource_id, model.version == version)
+        .values(active=False, version=model.version + 1)
+    )
+    if not _mutation_applied(result):
+        _raise_version_conflict(resource_id)
+
+
+async def _delete_resource_if_current(
+    session: AsyncSession, model: Any, resource_id: str, version: int
+) -> None:
+    result = await session.execute(
+        delete(model).where(model.id == resource_id, model.version == version)
+    )
+    if not _mutation_applied(result):
+        _raise_version_conflict(resource_id)
 
 
 _RETAIN_EXISTING = object()
@@ -355,12 +389,22 @@ async def admin_configuration_save(
     settings: Settings = Depends(get_app_settings),
 ) -> RedirectResponse:
     browser_session = await _action_session(request, settings, admin_session, csrf_token)
-    item, creating = await _load_edit_item(
-        session, _resource_model(resource_name), resource_id, version
-    )
-    changed_fields = _apply_resource_form(
-        item, resource_name, await request.form(), creating=creating
-    )
+    model = _resource_model(resource_name)
+    form = await request.form()
+    if version is None:
+        creating = True
+        changed_fields = _resource_form_values(resource_name, form, creating=True)
+        await lock_active_referenced_parents(
+            session, resource_name=resource_name, values=changed_fields
+        )
+        await _create_resource(session, model, resource_id, changed_fields)
+    else:
+        creating = False
+        changed_fields = _resource_form_values(resource_name, form, creating=False)
+        await lock_active_referenced_parents(
+            session, resource_name=resource_name, values=changed_fields
+        )
+        await _update_resource_if_current(session, model, resource_id, version, changed_fields)
     add_admin_audit_event(
         session,
         operator_name=browser_session.operator_name,
@@ -397,6 +441,29 @@ async def _active_dependency_counts(
     return {"active_dependencies": count}
 
 
+async def _lock_resource_for_mutation(
+    session: AsyncSession, model: Any, resource_id: str
+) -> Any | None:
+    """Lock a parent row before checking/deleting dependent rows.
+
+    PostgreSQL's ``FOR UPDATE`` also blocks concurrent child inserts which
+    need a key-share lock for their foreign key. SQLite accepts this as a
+    no-op, so its tests cover response semantics rather than lock behavior.
+    """
+    return await session.scalar(select(model).where(model.id == resource_id).with_for_update())
+
+
+async def _commit_resource_mutation(session: AsyncSession, resource_id: str) -> None:
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise ConflictError(
+            "Resource is referenced by a concurrent change",
+            details={"resource_id": resource_id},
+        ) from exc
+
+
 @router.post("/admin/configuration/{resource_name}/{resource_id}/deactivate")
 async def admin_configuration_deactivate(
     resource_name: str,
@@ -409,15 +476,16 @@ async def admin_configuration_deactivate(
     settings: Settings = Depends(get_app_settings),
 ) -> RedirectResponse:
     browser_session = await _action_session(request, settings, admin_session, csrf_token)
-    item = await session.get(_resource_model(resource_name), resource_id)
+    model = _resource_model(resource_name)
+    item = await _lock_resource_for_mutation(session, model, resource_id)
     if item is None:
         raise HTTPException(status_code=404, detail="resource_not_found")
-    require_current_version(item, version)
+    if item.version != version:
+        _raise_version_conflict(resource_id)
     blockers = await _active_dependency_counts(session, resource_name, resource_id)
     if any(blockers.values()):
         raise HTTPException(status_code=409, detail=blockers)
-    item.active = False
-    item.version += 1
+    await _deactivate_resource_if_current(session, model, resource_id, version)
     add_admin_audit_event(
         session,
         operator_name=browser_session.operator_name,
@@ -427,7 +495,7 @@ async def admin_configuration_deactivate(
         changed_fields={"active": False},
         request_id=getattr(request.state, "request_id", None),
     )
-    await session.commit()
+    await _commit_resource_mutation(session, resource_id)
     return RedirectResponse(f"/admin/configuration/{resource_name}", status_code=303)
 
 
@@ -465,15 +533,17 @@ async def admin_configuration_delete(
     settings: Settings = Depends(get_app_settings),
 ) -> RedirectResponse:
     browser_session = await _action_session(request, settings, admin_session, csrf_token)
-    item = await session.get(_resource_model(resource_name), resource_id)
+    model = _resource_model(resource_name)
+    item = await _lock_resource_for_mutation(session, model, resource_id)
     if item is None:
         raise HTTPException(status_code=404, detail="resource_not_found")
-    require_current_version(item, version)
+    if item.version != version:
+        _raise_version_conflict(resource_id)
     if await _historical_dependency_count(session, resource_name, resource_id):
         raise HTTPException(status_code=409, detail="resource_is_referenced_deactivate_instead")
     if item.active:
         raise HTTPException(status_code=409, detail="deactivate_before_delete")
-    await session.delete(item)
+    await _delete_resource_if_current(session, model, resource_id, version)
     add_admin_audit_event(
         session,
         operator_name=browser_session.operator_name,
@@ -482,5 +552,5 @@ async def admin_configuration_delete(
         resource_id=resource_id,
         request_id=getattr(request.state, "request_id", None),
     )
-    await session.commit()
+    await _commit_resource_mutation(session, resource_id)
     return RedirectResponse(f"/admin/configuration/{resource_name}", status_code=303)

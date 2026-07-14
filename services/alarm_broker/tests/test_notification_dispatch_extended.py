@@ -20,9 +20,9 @@ from alarm_broker.settings import Settings
 from alarm_broker.types import EnrichedAlarmContext
 
 try:
-    from tests.constants import EMPTY_SECRET_VALUE, TEST_ADMIN_API_KEY
+    from tests.constants import EMPTY_SECRET_VALUE, TEST_ADMIN_API_KEY, value_for_test
 except ModuleNotFoundError:
-    from constants import EMPTY_SECRET_VALUE, TEST_ADMIN_API_KEY
+    from constants import EMPTY_SECRET_VALUE, TEST_ADMIN_API_KEY, value_for_test
 
 pytestmark = [pytest.mark.unit]
 
@@ -78,8 +78,10 @@ def _make_svc(*, zammad_enabled: bool = True) -> NotificationService:
         customer="guess:test@example.org",
     )
     sendxms = MagicMock()
+    sendxms.enabled.return_value = True
     sendxms.send_sms = AsyncMock()
     signal = MagicMock()
+    signal.enabled.return_value = True
     signal.send_group_message = AsyncMock()
     return NotificationService(zammad=zammad, sendxms=sendxms, signal=signal)
 
@@ -177,7 +179,7 @@ async def test_send_skips_disabled_target():
 # ── _send_email_notifications ──────────────────────────────────────────
 
 
-async def test_send_email_zammad_disabled_logs_error():
+async def test_send_email_zammad_disabled_logs_skipped():
     svc = _make_svc(zammad_enabled=False)
     session = await _noop_session()
     target = _make_target(channel="email")
@@ -185,10 +187,11 @@ async def test_send_email_zammad_disabled_logs_error():
         alarm=_make_alarm(), enriched=_make_enriched(), step_no=0, ack_url=None
     )
 
-    await svc._send_email_notifications(session, target, payload)
+    with patch.object(svc, "_log_notification_result", new_callable=AsyncMock) as mock_log:
+        await svc._send_email_notifications(session, target, payload)
 
-    # Should have committed (logged error) but not called create_ticket
     svc._zammad.create_ticket.assert_not_called()
+    mock_log.assert_called_once_with(session, target, payload, "skipped", "Zammad not enabled")
 
 
 async def test_send_email_zammad_create_ticket_exception_logs_error():
@@ -236,6 +239,21 @@ async def test_send_via_signal_success():
     svc._signal.send_group_message.assert_called_once()
 
 
+async def test_send_via_signal_disabled_logs_skipped() -> None:
+    svc, session = _make_svc(), await _noop_session()
+    svc._signal.enabled.return_value = False
+    target = _make_target(channel="signal", address="group-id")
+    payload = svc._build_notification_payload(
+        alarm=_make_alarm(), enriched=_make_enriched(), step_no=0, ack_url=None
+    )
+
+    with patch.object(svc, "_log_notification_result", new_callable=AsyncMock) as mock_log:
+        await svc._send_via_signal(session, target, payload["body"], payload)
+
+    svc._signal.send_group_message.assert_not_called()
+    mock_log.assert_called_once_with(session, target, payload, "skipped", "Signal not enabled")
+
+
 # ── _send_via_sendxms ─────────────────────────────────────────────────
 
 
@@ -251,6 +269,21 @@ async def test_send_via_sendxms_exception_does_not_raise():
     await svc._send_via_sendxms(session, target, payload["body"], payload)
 
     session.commit.assert_called()
+
+
+async def test_send_via_sendxms_disabled_logs_skipped() -> None:
+    svc, session = _make_svc(), await _noop_session()
+    svc._sendxms.enabled.return_value = False
+    target = _make_target(channel="sms", address="+491234")
+    payload = svc._build_notification_payload(
+        alarm=_make_alarm(), enriched=_make_enriched(), step_no=0, ack_url=None
+    )
+
+    with patch.object(svc, "_log_notification_result", new_callable=AsyncMock) as mock_log:
+        await svc._send_via_sendxms(session, target, payload["body"], payload)
+
+    svc._sendxms.send_sms.assert_not_called()
+    mock_log.assert_called_once_with(session, target, payload, "skipped", "SendXMS not enabled")
 
 
 # ── _send_webhook_notifications ───────────────────────────────────────
@@ -322,6 +355,7 @@ async def test_send_webhook_http_error():
     with patch(
         "alarm_broker.services.notification_service.validate_url_not_internal",
         new_callable=AsyncMock,
+        return_value=("1.1.1.1",),
     ):
         with patch(
             "alarm_broker.services.notification_service.httpx.AsyncClient",
@@ -443,6 +477,7 @@ async def test_send_webhook_success_logs_ok():
     with patch(
         "alarm_broker.services.notification_service.validate_url_not_internal",
         new_callable=AsyncMock,
+        return_value=("1.1.1.1",),
     ):
         with patch(
             "alarm_broker.services.notification_service.httpx.AsyncClient",
@@ -457,6 +492,101 @@ async def test_send_webhook_success_logs_ok():
                 )
 
     mock_log.assert_called_once_with(session, target, payload, "ok")
+
+
+async def test_send_webhook_fails_over_to_second_validated_address():
+    svc, session = _make_svc(), await _noop_session()
+    target = _make_target(channel="webhook", address="https://hooks.example.test/hook")
+    payload = svc._build_notification_payload(
+        alarm=_make_alarm(), enriched=_make_enriched(), step_no=0, ack_url=None
+    )
+    attempts: list[tuple[str, dict[str, str], dict[str, Any]]] = []
+
+    class FailoverClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, url, *, headers, extensions, **_kwargs):
+            attempts.append((url, headers, extensions))
+            if "1.1.1.1" in url:
+                raise RuntimeError("first address unavailable")
+            return MagicMock(raise_for_status=MagicMock())
+
+    with patch(
+        "alarm_broker.services.notification_service.validate_url_not_internal",
+        new_callable=AsyncMock,
+        return_value=("1.1.1.1", "8.8.8.8"),
+    ):
+        with patch(
+            "alarm_broker.services.notification_service.httpx.AsyncClient",
+            return_value=FailoverClient(),
+        ):
+            with patch.object(svc, "_log_notification_result", new_callable=AsyncMock) as mock_log:
+                await svc._send_webhook_notifications(
+                    session,
+                    target,
+                    payload,
+                    _make_settings(webhook_allowed_hosts="hooks.example.test"),
+                )
+
+    expect([attempt[0] for attempt in attempts] == ["https://1.1.1.1/hook", "https://8.8.8.8/hook"])
+    expect(all(attempt[1]["Host"] == "hooks.example.test" for attempt in attempts))
+    expect(all(attempt[2]["sni_hostname"] == "hooks.example.test" for attempt in attempts))
+    mock_log.assert_called_once_with(session, target, payload, "ok")
+
+
+async def test_send_webhook_logs_one_safe_error_when_all_validated_addresses_fail():
+    svc, session = _make_svc(), await _noop_session()
+    secret = value_for_test("target-webhook-query")
+    target = _make_target(
+        channel="webhook", address=f"https://hooks.example.test/hook?token={secret}"
+    )
+    payload = svc._build_notification_payload(
+        alarm=_make_alarm(), enriched=_make_enriched(), step_no=0, ack_url=None
+    )
+    attempts: list[str] = []
+
+    class FailingClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, url, **_kwargs):
+            attempts.append(url)
+            raise RuntimeError(f"delivery failed for {url}")
+
+    with patch(
+        "alarm_broker.services.notification_service.validate_url_not_internal",
+        new_callable=AsyncMock,
+        return_value=("1.1.1.1", "8.8.8.8"),
+    ):
+        with patch(
+            "alarm_broker.services.notification_service.httpx.AsyncClient",
+            return_value=FailingClient(),
+        ):
+            with patch.object(svc, "_log_notification_result", new_callable=AsyncMock) as mock_log:
+                await svc._send_webhook_notifications(
+                    session,
+                    target,
+                    payload,
+                    _make_settings(webhook_allowed_hosts="hooks.example.test"),
+                )
+
+    expect(
+        attempts
+        == [
+            f"https://1.1.1.1/hook?token={secret}",
+            f"https://8.8.8.8/hook?token={secret}",
+        ]
+    )
+    error = mock_log.await_args.args[4]
+    expect(mock_log.await_args.args[3] == "error")
+    expect(secret not in error)
 
 
 # ── handle_zammad_ticket ───────────────────────────────────────────────

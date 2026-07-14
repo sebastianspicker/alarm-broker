@@ -115,6 +115,40 @@ async def test_list_alarms_cursor_pagination(engine, sessionmaker, seeded_db, fa
             expect(page1_ids.isdisjoint(page2_ids))
 
 
+async def test_list_alarms_ignores_cursor_outside_active_filters(
+    engine, sessionmaker, seeded_db, fake_redis, settings
+):
+    """A cursor from another result set must not skip rows in the active result set."""
+    settings.admin_api_key = "dev-admin-key"
+    now = datetime.now(UTC)
+    outside = _make_alarm(index=0, now=now, source="outside", severity="P1")
+    expected = [
+        _make_alarm(index=1, now=now, source="inside", severity="P0"),
+        _make_alarm(index=2, now=now, source="inside", severity="P2"),
+    ]
+
+    async with sessionmaker() as session:
+        session.add_all([outside, *expected])
+        await session.commit()
+
+    app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(
+                "/v1/alarms",
+                params={
+                    "source": "inside",
+                    "sort_by": "severity",
+                    "sort_order": "asc",
+                    "cursor": str(outside.id),
+                },
+                headers=ADMIN_HEADERS,
+            )
+
+    expect(response.status_code == 200)
+    expect([item["id"] for item in response.json()] == [str(alarm.id) for alarm in expected])
+
+
 async def test_list_alarms_status_filter(engine, sessionmaker, seeded_db, fake_redis, settings):
     """List alarms filtered by status."""
     settings.admin_api_key = "dev-admin-key"

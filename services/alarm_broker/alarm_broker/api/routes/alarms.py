@@ -132,7 +132,7 @@ async def _apply_cursor_filter(
 ) -> Select:
     if cursor is None:
         return stmt
-    cursor_alarm = await session.get(Alarm, cursor)
+    cursor_alarm = await session.scalar(stmt.where(Alarm.id == cursor))
     if not cursor_alarm:
         return stmt
     sort_column = _SORT_COLUMNS[sort_by]

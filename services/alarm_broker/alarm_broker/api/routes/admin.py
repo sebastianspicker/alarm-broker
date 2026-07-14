@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alarm_broker.api.deps import get_app_settings, get_session, require_admin
 from alarm_broker.api.schemas import DeviceUpsertIn, EscalationPolicyIn
 from alarm_broker.db.models import Device
+from alarm_broker.services.master_data_lifecycle import lock_active_referenced_parents
 from alarm_broker.services.policy_service import apply_escalation_policy
 from alarm_broker.services.seed_service import (
     _MAX_SEED_BYTES,
@@ -24,30 +28,41 @@ async def admin_create_device(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, str]:
     """Create or update a device. POST is used as it performs upsert."""
-    device = await session.scalar(select(Device).where(Device.device_token == body.device_token))
-    if not device:
-        device = Device(
-            id=body.id or f"device:{body.device_token}",
-            vendor=body.vendor,
-            model_family=body.model_family,
-            mac=body.mac,
-            account_ext=body.account_ext,
-            device_token=body.device_token,
-            person_id=body.person_id,
-            room_id=body.room_id,
-            last_seen_at=None,
+    values = {
+        "vendor": body.vendor,
+        "model_family": body.model_family,
+        "mac": body.mac,
+        "account_ext": body.account_ext,
+        "person_id": body.person_id,
+        "room_id": body.room_id,
+    }
+    await lock_active_referenced_parents(
+        session,
+        resource_name="devices",
+        values={**values, "active": True},
+    )
+    device_id = await session.scalar(
+        update(Device)
+        .where(Device.device_token == body.device_token)
+        .values(**values, version=Device.version + 1)
+        .returning(Device.id)
+    )
+    if device_id is None:
+        device_id = body.id or f"device:{uuid.uuid4()}"
+        session.add(
+            Device(
+                id=device_id,
+                device_token=body.device_token,
+                last_seen_at=None,
+                **values,
+            )
         )
-        session.add(device)
-    else:
-        device.vendor = body.vendor
-        device.model_family = body.model_family
-        device.mac = body.mac
-        device.account_ext = body.account_ext
-        device.person_id = body.person_id
-        device.room_id = body.room_id
-
-    await session.commit()
-    return {"ok": "true", "device_id": device.id}
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="device_upsert_conflict") from exc
+    return {"ok": "true", "device_id": device_id}
 
 
 @router.post("/escalation-policy", status_code=status.HTTP_201_CREATED)

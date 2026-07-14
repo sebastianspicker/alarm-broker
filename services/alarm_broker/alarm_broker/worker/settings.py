@@ -23,13 +23,14 @@ from alarm_broker.worker.tasks import (
 
 async def startup(ctx: dict) -> None:
     settings = get_settings()
+    settings.validate_runtime_configuration()
     ctx["settings"] = settings
 
     engine = create_async_engine_from_url(settings.database_url)
     ctx["engine"] = engine
     ctx["sessionmaker"] = create_sessionmaker(engine)
 
-    http = httpx.AsyncClient(timeout=httpx.Timeout(10.0))
+    http = httpx.AsyncClient(timeout=httpx.Timeout(10.0), trust_env=False)
     ctx["http"] = http
 
     # Use mock connectors in simulation mode

@@ -10,8 +10,10 @@ except ModuleNotFoundError:
 import hashlib
 import hmac
 import json
+import logging
 import uuid
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
 import httpx
 import respx
@@ -21,8 +23,11 @@ from alarm_broker import constants
 from alarm_broker.connectors.mock import MockSendXmsClient, MockSignalClient, MockZammadClient
 from alarm_broker.db.models import Alarm, AlarmNotification, AlarmStatus
 from alarm_broker.worker.tasks import (
+    WebhookDelivery,
     _build_webhook_payload,
     _send_webhook_with_retry,
+    alarm_acked,
+    alarm_created,
     alarm_state_changed,
     escalate,
     process_alarm_event,
@@ -106,6 +111,33 @@ async def test_build_webhook_payload(sessionmaker, seeded_db):
     expect(payload["cancelled_at"] is None)
 
 
+async def test_deleted_alarm_worker_handlers_skip_external_work(
+    sessionmaker, seeded_db, settings, monkeypatch
+):
+    """All worker entry points stop before enrichment, delivery, or webhooks after deletion."""
+    alarm_id = uuid.uuid4()
+    async with sessionmaker() as session:
+        session.add(_make_alarm(alarm_id, deleted_at=datetime.now(UTC)))
+        await session.commit()
+
+    enrich = AsyncMock()
+    webhook = AsyncMock()
+    monkeypatch.setattr("alarm_broker.worker.tasks.enrich_alarm_context", enrich)
+    monkeypatch.setattr("alarm_broker.worker.tasks._send_webhook_with_retry", webhook)
+    settings.webhook_enabled = True
+    settings.webhook_url = "https://hooks.example.test/deleted"
+    settings.webhook_allowed_hosts = "hooks.example.test"
+    ctx = _make_ctx(sessionmaker, settings)
+
+    await alarm_created(ctx, str(alarm_id))
+    await escalate(ctx, str(alarm_id), step_no=1)
+    await alarm_acked(ctx, str(alarm_id), acked_by="operator")
+    await alarm_state_changed(ctx, str(alarm_id), "triggered")
+
+    expect(enrich.await_count == 0)
+    expect(webhook.await_count == 0)
+
+
 # ---------------------------------------------------------------------------
 # b) test_alarm_state_changed_posts_webhook_with_hmac
 # ---------------------------------------------------------------------------
@@ -130,8 +162,8 @@ async def test_alarm_state_changed_posts_webhook_with_hmac(
     http = httpx.AsyncClient()
     ctx = _make_ctx(sessionmaker, settings, http)
 
-    async def allow_webhook(_url: str) -> None:
-        return None
+    async def allow_webhook(_url: str) -> tuple[str, ...]:
+        return ("1.1.1.1",)
 
     monkeypatch.setattr("alarm_broker.worker.tasks.validate_url_not_internal", allow_webhook)
 
@@ -147,7 +179,7 @@ async def test_alarm_state_changed_posts_webhook_with_hmac(
             expect(sig == expected)
             return httpx.Response(200, json={"ok": True})
 
-        mock_router.post("https://hooks.example.test/hmac").mock(side_effect=_check_hmac)
+        mock_router.post("https://1.1.1.1/hmac").mock(side_effect=_check_hmac)
         await alarm_state_changed(ctx, str(alarm_id), "triggered")
 
     await http.aclose()
@@ -177,13 +209,13 @@ async def test_process_alarm_event_dispatches_state_changed(
     http = httpx.AsyncClient()
     ctx = _make_ctx(sessionmaker, settings, http)
 
-    async def allow_webhook(_url: str) -> None:
-        return None
+    async def allow_webhook(_url: str) -> tuple[str, ...]:
+        return ("1.1.1.1",)
 
     monkeypatch.setattr("alarm_broker.worker.tasks.validate_url_not_internal", allow_webhook)
 
     with respx.mock(assert_all_called=True) as mock_router:
-        route = mock_router.post("https://hooks.example.test/event").respond(200, json={"ok": True})
+        route = mock_router.post("https://1.1.1.1/event").respond(200, json={"ok": True})
 
         await process_alarm_event(
             ctx,
@@ -332,7 +364,7 @@ async def test_send_webhook_with_retry_handles_failure(sessionmaker, seeded_db):
     payload_bytes = json.dumps(payload_dict, separators=(",", ":")).encode()
 
     with respx.mock as mock_router:
-        mock_router.post("https://hooks.example.test/fail").respond(500, text="Internal Error")
+        mock_router.post("https://1.1.1.1/fail").respond(500, text="Internal Error")
 
         async with sessionmaker() as session:
             await _send_webhook_with_retry(
@@ -341,9 +373,8 @@ async def test_send_webhook_with_retry_handles_failure(sessionmaker, seeded_db):
                 payload_bytes=payload_bytes,
                 headers={"Content-Type": "application/json"},
                 timeout=5.0,
-                alarm_id=alarm_id,
-                session=session,
-                state="triggered",
+                delivery=WebhookDelivery(alarm_id=alarm_id, session=session, state="triggered"),
+                resolved_addresses=("1.1.1.1",),
             )
 
             # Should have logged an error notification
@@ -358,3 +389,119 @@ async def test_send_webhook_with_retry_handles_failure(sessionmaker, seeded_db):
     expect(row.error is not None)
 
     await http.aclose()
+
+
+async def test_state_webhook_fails_over_to_second_validated_address(
+    sessionmaker, seeded_db, monkeypatch
+):
+    """State callbacks keep Host/SNI while moving from a failed pin to the next pin."""
+    alarm_id = uuid.uuid4()
+    calls: list[tuple[str, dict[str, str], dict[str, object]]] = []
+
+    async def post_once(_http, url, _payload, headers, _timeout, extensions):
+        calls.append((url, headers, extensions))
+        if "1.1.1.1" in url:
+            raise RuntimeError("first address unavailable")
+
+    monkeypatch.setattr("alarm_broker.worker.tasks._post_webhook", post_once)
+
+    async with sessionmaker() as session:
+        session.add(_make_alarm(alarm_id))
+        await session.commit()
+        await _send_webhook_with_retry(
+            http=object(),
+            webhook_url="https://hooks.example.test/state",
+            payload_bytes=b"{}",
+            headers={"Content-Type": "application/json"},
+            timeout=0.01,
+            delivery=WebhookDelivery(alarm_id=alarm_id, session=session, state="triggered"),
+            resolved_addresses=("1.1.1.1", "8.8.8.8"),
+        )
+
+    expect([call[0] for call in calls] == ["https://1.1.1.1/state", "https://8.8.8.8/state"])
+    expect(all(call[1]["Host"] == "hooks.example.test" for call in calls))
+    expect(all(call[2]["sni_hostname"] == "hooks.example.test" for call in calls))
+
+
+async def test_state_webhook_logs_one_safe_error_after_all_validated_addresses_fail(
+    sessionmaker, seeded_db, monkeypatch
+):
+    """State callbacks do not use the hostname after each validated pin fails."""
+    alarm_id = uuid.uuid4()
+    secret = value_for_test("state-webhook-query")
+    calls: list[str] = []
+
+    async def fail_every_address(_http, url, _payload, _headers, _timeout, _extensions):
+        calls.append(url)
+        raise RuntimeError(f"delivery failed for {url}")
+
+    monkeypatch.setattr("alarm_broker.worker.tasks._post_webhook", fail_every_address)
+
+    async with sessionmaker() as session:
+        session.add(_make_alarm(alarm_id))
+        await session.commit()
+        await _send_webhook_with_retry(
+            http=object(),
+            webhook_url=f"https://hooks.example.test/state?token={secret}",
+            payload_bytes=b"{}",
+            headers={"Content-Type": "application/json"},
+            timeout=0.01,
+            delivery=WebhookDelivery(alarm_id=alarm_id, session=session, state="triggered"),
+            resolved_addresses=("1.1.1.1", "8.8.8.8"),
+        )
+
+        row = await session.scalar(
+            select(AlarmNotification)
+            .where(AlarmNotification.alarm_id == alarm_id)
+            .where(AlarmNotification.channel == "webhook")
+        )
+
+    expect(
+        calls
+        == [
+            f"https://1.1.1.1/state?token={secret}",
+            f"https://8.8.8.8/state?token={secret}",
+        ]
+    )
+    expect(row is not None)
+    expect(row.error is not None)
+    expect(secret not in row.error)
+
+
+async def test_pinned_webhook_failure_redacts_query_from_audit_and_logs(
+    sessionmaker,
+    seeded_db,
+    caplog,
+):
+    alarm_id = uuid.uuid4()
+    secret = value_for_test("webhook-query")
+
+    class FailingHttp:
+        async def post(self, url, **_kwargs):  # noqa: ANN001
+            raise RuntimeError(f"request failed for {url}")
+
+    async with sessionmaker() as session:
+        session.add(_make_alarm(alarm_id))
+        await session.commit()
+
+        caplog.set_level(logging.ERROR, logger="alarm_broker")
+        await _send_webhook_with_retry(
+            http=FailingHttp(),
+            webhook_url=f"https://hooks.example.test/fail?token={secret}",
+            payload_bytes=b"{}",
+            headers={"Content-Type": "application/json"},
+            timeout=0.01,
+            delivery=WebhookDelivery(alarm_id=alarm_id, session=session, state="triggered"),
+            resolved_addresses=("203.0.113.10",),
+        )
+
+        row = await session.scalar(
+            select(AlarmNotification)
+            .where(AlarmNotification.alarm_id == alarm_id)
+            .where(AlarmNotification.channel == "webhook")
+        )
+
+    assert row is not None
+    assert row.error is not None
+    assert secret not in row.error
+    assert secret not in caplog.text

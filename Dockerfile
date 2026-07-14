@@ -63,4 +63,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')" || exit 1
 
 # Run command
-CMD ["uvicorn", "alarm_broker.api.main:app", "--host", "0.0.0.0", "--port", "8080", "--no-server-header"]
+CMD ["uvicorn", "alarm_broker.api.main:app", "--host", "0.0.0.0", "--port", "8080", "--no-server-header", "--no-access-log"]
