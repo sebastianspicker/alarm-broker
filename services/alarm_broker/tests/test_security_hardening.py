@@ -32,6 +32,13 @@ except ModuleNotFoundError:
 pytestmark = [pytest.mark.security]
 
 
+def test_canonical_container_disables_uvicorn_access_logging() -> None:
+    """Bearer tokens in query strings and ACK paths must not reach Uvicorn logs."""
+    dockerfile = Path(__file__).resolve().parents[3] / "Dockerfile"
+
+    expect('"--no-access-log"' in dockerfile.read_text(encoding="utf-8"))
+
+
 async def test_untrusted_x_forwarded_for_does_not_bypass_ip_allowlist(
     engine, seeded_db, fake_redis, settings
 ):

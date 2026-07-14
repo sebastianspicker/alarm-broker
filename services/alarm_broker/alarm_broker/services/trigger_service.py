@@ -12,19 +12,20 @@ from datetime import UTC, datetime
 from typing import Any
 
 from arq.connections import ArqRedis
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alarm_broker import constants
-from alarm_broker.core.idempotency import bucket_10s, idempotency_key
 from alarm_broker.core.rate_limit import rate_limit_key
 from alarm_broker.core.redis_atomic import compare_and_delete, redis_text
+from alarm_broker.db.json_merge import merge_json_object
 from alarm_broker.db.models import Alarm, AlarmStatus, Device, Person, Room, Site
 from alarm_broker.services.event_service import (
     EventResult,
     enqueue_alarm_created_event,
     enqueue_alarm_state_changed_event,
 )
+from alarm_broker.services.trigger_result import TriggerResult
 from alarm_broker.settings import Settings
 
 logger = logging.getLogger("alarm_broker")
@@ -35,57 +36,12 @@ def _hash_token_for_logging(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()[:16]
 
 
-class TriggerResult:
-    """Result of a trigger operation.
-
-    Attributes:
-        success: Whether the trigger was successful
-        alarm_id: ID of the alarm (new or existing)
-        status: Status of the alarm
-        is_duplicate: Whether this was a duplicate/idempotent request
-        error_code: HTTP error code if failed
-        error_message: Error message if failed
-    """
-
-    def __init__(
-        self,
-        *,
-        success: bool = True,
-        alarm_id: uuid.UUID | None = None,
-        status: AlarmStatus | None = None,
-        is_duplicate: bool = False,
-        error_code: int | None = None,
-        error_message: str | None = None,
-    ) -> None:
-        self.success = success
-        self.alarm_id = alarm_id
-        self.status = status
-        self.is_duplicate = is_duplicate
-        self.error_code = error_code
-        self.error_message = error_message
-
-    @classmethod
-    def ok(
-        cls, alarm_id: uuid.UUID, status: AlarmStatus, is_duplicate: bool = False
-    ) -> TriggerResult:
-        """Create a successful result."""
-        return cls(success=True, alarm_id=alarm_id, status=status, is_duplicate=is_duplicate)
-
-    @classmethod
-    def error(cls, code: int, message: str) -> TriggerResult:
-        """Create an error result."""
-        return cls(success=False, error_code=code, error_message=message)
+def _active_record(record: Person | Room | Site | None) -> bool:
+    return record is None or record.active is not False
 
 
 class TriggerService:
-    """Service for handling alarm triggers.
-
-    This service encapsulates all trigger logic including:
-    - Idempotency checking
-    - Rate limiting
-    - Device validation
-    - Alarm creation
-    """
+    """Service for idempotent, rate-limited alarm triggers."""
 
     _IDEMPOTENCY_LOOKUP_ATTEMPTS = 5
     _IDEMPOTENCY_LOOKUP_DELAY_SECONDS = 0.05
@@ -107,15 +63,13 @@ class TriggerService:
             session: Database session
             redis: Redis connection for idempotency/rate limiting
             settings: Application settings
-            idempotency_bucket: Optional pre-computed idempotency bucket
+            idempotency_bucket: Retained for caller compatibility. Idempotency leases
+                are token-derived and deliberately do not use time buckets.
             rate_limit_bucket: Optional pre-computed rate limit bucket
         """
         self._session = session
         self._redis = redis
         self._settings = settings
-        self._idempotency_bucket = (
-            idempotency_bucket if idempotency_bucket is not None else bucket_10s()
-        )
         self._rate_limit_bucket = rate_limit_bucket
 
     def _get_idempotency_key(self, token: str) -> str:
@@ -127,8 +81,12 @@ class TriggerService:
         Returns:
             Redis key string
         """
-        idem = idempotency_key(token, self._idempotency_bucket)
-        return f"idemp:{idem}"
+        # The reservation has a 30-second TTL. Including a shorter, 10-second
+        # time bucket in its key let a duplicate cross a bucket boundary and
+        # reserve a second alarm. Hash the token so the Redis key remains safe
+        # to inspect without exposing the bearer credential itself.
+        token_digest = hashlib.sha256(token.encode()).hexdigest()
+        return f"idemp:{token_digest}"
 
     def _get_rate_limit_key(self, token: str) -> str:
         """Get the Redis key for rate limiting.
@@ -250,17 +208,18 @@ class TriggerService:
             return None, "Device mapping incomplete"
         if device.active is False:
             return None, "Device mapping incomplete"
+        if not await self._device_context_active(device):
+            return None, "Device mapping incomplete"
+        return device, None
+
+    async def _device_context_active(self, device: Device) -> bool:
         person = await self._session.get(Person, device.person_id)
         room = await self._session.get(Room, device.room_id)
-        if person is not None and person.active is False:
-            return None, "Device mapping incomplete"
-        if room is not None and room.active is False:
-            return None, "Device mapping incomplete"
-        if room is not None:
-            site = await self._session.get(Site, room.site_id)
-            if site is not None and site.active is False:
-                return None, "Device mapping incomplete"
-        return device, None
+        if not _active_record(person) or not _active_record(room):
+            return False
+        if room is None:
+            return True
+        return _active_record(await self._session.get(Site, room.site_id))
 
     async def create_alarm(
         self,
@@ -290,8 +249,6 @@ class TriggerService:
         now = datetime.now(UTC)
         device.last_seen_at = now
 
-        idem = idempotency_key(device.device_token, self._idempotency_bucket)
-
         alarm = Alarm(
             id=alarm_id,
             status=AlarmStatus.TRIGGERED,
@@ -309,7 +266,7 @@ class TriggerService:
                 "client_ip": client_ip,
                 "user_agent": user_agent,
                 **({"request_id": request_id} if request_id else {}),
-                "idempotency": {"bucket": self._idempotency_bucket, "key": idem},
+                "idempotency": {"key": self._get_idempotency_key(device.device_token)},
                 "event_delivery": self._event_delivery_defaults(),
             },
         )
@@ -348,6 +305,7 @@ class TriggerService:
         alarm_state_changed_enqueued: bool | None = None,
         last_error: str | None = None,
     ) -> None:
+        await self._session.refresh(alarm)
         state = self._event_delivery_state(alarm)
         if alarm_created_enqueued is not None:
             state["alarm_created_enqueued"] = alarm_created_enqueued
@@ -355,8 +313,20 @@ class TriggerService:
             state["alarm_state_changed_enqueued"] = alarm_state_changed_enqueued
         state["last_error"] = last_error
         state["last_attempt_at"] = datetime.now(UTC).isoformat()
-        alarm.meta = {**(alarm.meta or {}), "event_delivery": state}
+        await self._session.execute(
+            update(Alarm)
+            .where(Alarm.id == alarm.id)
+            .values(
+                meta=merge_json_object(
+                    Alarm.meta,
+                    {"event_delivery": state},
+                    dialect_name=self._session.get_bind().dialect.name,
+                )
+            )
+            .execution_options(synchronize_session=False)
+        )
         await self._session.commit()
+        await self._session.refresh(alarm)
 
     async def _load_alarm_with_retry(self, alarm_id: uuid.UUID) -> Alarm | None:
         for attempt in range(self._IDEMPOTENCY_LOOKUP_ATTEMPTS):

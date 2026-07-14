@@ -75,9 +75,9 @@ class TargetIn(BaseModel):
 
 
 class StepIn(BaseModel):
-    step_no: int
-    after_seconds: int
-    target_ids: list[str]
+    step_no: int = Field(ge=0)
+    after_seconds: int = Field(ge=0)
+    target_ids: list[str] = Field(min_length=1)
 
 
 class EscalationPolicyIn(BaseModel):

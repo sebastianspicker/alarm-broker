@@ -29,8 +29,8 @@ from alarm_broker.services.ack_ui import render_ack_page
 from alarm_broker.services.alarm_service import acknowledge_alarm, get_alarm_by_ack_token
 from alarm_broker.services.enrichment_service import enrich_alarm_context
 from alarm_broker.services.event_service import (
-    enqueue_alarm_acked_event,
-    enqueue_alarm_state_changed_event,
+    dispatch_pending_alarm_events,
+    has_pending_alarm_events,
 )
 from alarm_broker.settings import Settings
 
@@ -101,31 +101,47 @@ def _parse_ack_payload(form) -> AckIn:
         ) from exc
 
 
-async def _enqueue_ack_followups(request: Request, redis, alarm, payload: AckIn) -> None:
+async def _enqueue_ack_followups(request: Request, redis, session: AsyncSession, alarm) -> None:
     request.state.alarm_id = str(alarm.id)
-    ack_result = await enqueue_alarm_acked_event(
-        redis,
-        alarm_id=alarm.id,
-        acked_by=payload.acked_by,
-        note=payload.note,
-        logger=logger,
+    published = await dispatch_pending_alarm_events(
+        session, redis, logger=logger, alarm_id=alarm.id
     )
-    if not ack_result.success:
+    if await has_pending_alarm_events(session, alarm.id):
         logger.warning(
-            "ack_event_enqueue_failed",
-            extra={"alarm_id": str(alarm.id), "error": ack_result.error},
+            "ack_event_delivery_pending",
+            extra={"alarm_id": str(alarm.id), "published": published},
         )
-    state_result = await enqueue_alarm_state_changed_event(
-        redis,
-        alarm_id=alarm.id,
-        state=alarm.status.value,
-        logger=logger,
+
+
+async def _invalid_ack_response(
+    session: AsyncSession,
+    form,
+    alarm,
+    ack_token: str,
+    locale: str,
+    status_code: int,
+) -> HTMLResponse:
+    enriched = await enrich_alarm_context(session, alarm)
+    message = (
+        "Name or note is too long. Check the fields and try again."
+        if locale == "en"
+        else "Name oder Notiz ist zu lang. Prüfen Sie die Felder und versuchen Sie es erneut."
     )
-    if not state_result.success:
-        logger.warning(
-            "state_event_enqueue_failed",
-            extra={"alarm_id": str(alarm.id), "error": state_result.error},
-        )
+    return HTMLResponse(
+        render_ack_page(
+            alarm,
+            enriched,
+            ack_action=f"/a/{ack_token}?lang={locale}",
+            locale=locale,
+            csrf_token=str(form.get("csrf_token", "")),
+            error=message,
+            values={
+                "acked_by": str(form.get("acked_by", ""))[:120],
+                "note": str(form.get("note", ""))[:2000],
+            },
+        ),
+        status_code=status_code,
+    )
 
 
 @router.get("/a/{ack_token}", response_class=HTMLResponse)
@@ -195,26 +211,13 @@ async def ack_submit(
     try:
         payload = _parse_ack_payload(form)
     except HTTPException as exc:
-        enriched = await enrich_alarm_context(session, alarm)
-        message = (
-            "Name or note is too long. Check the fields and try again."
-            if selected_locale == "en"
-            else "Name oder Notiz ist zu lang. Prüfen Sie die Felder und versuchen Sie es erneut."
-        )
-        return HTMLResponse(
-            render_ack_page(
-                alarm,
-                enriched,
-                ack_action=f"/a/{ack_token}?lang={selected_locale}",
-                locale=selected_locale,
-                csrf_token=str(form.get("csrf_token", "")),
-                error=message,
-                values={
-                    "acked_by": str(form.get("acked_by", ""))[:120],
-                    "note": str(form.get("note", ""))[:2000],
-                },
-            ),
-            status_code=exc.status_code,
+        return await _invalid_ack_response(
+            session,
+            form,
+            alarm,
+            ack_token,
+            selected_locale,
+            exc.status_code,
         )
 
     changed = await acknowledge_alarm(
@@ -224,7 +227,7 @@ async def ack_submit(
         note=payload.note,
     )
     if changed:
-        await _enqueue_ack_followups(request, redis, alarm, payload)
+        await _enqueue_ack_followups(request, redis, session, alarm)
 
     enriched = await enrich_alarm_context(session, alarm)
     return HTMLResponse(

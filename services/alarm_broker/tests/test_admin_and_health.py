@@ -12,9 +12,11 @@ from datetime import UTC, datetime
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 
 from alarm_broker.api.main import create_app
 from alarm_broker.api.routes.admin_ui import _render_alarm_row
+from alarm_broker.api.routes.health import EXPECTED_ALEMBIC_HEAD
 from alarm_broker.db.models import Alarm, AlarmStatus
 
 try:
@@ -288,6 +290,106 @@ async def test_readyz_healthy_returns_200(engine, seeded_db, fake_redis, setting
     body = response.json()
     expect(body["ok"] == "true")
     expect(body["db"] == "ok")
+    expect(body["schema"] == "ok")
+
+
+@pytest.mark.parametrize(
+    ("versions", "expected_status"),
+    [
+        ([], "empty"),
+        (["0006"], "stale"),
+        ([EXPECTED_ALEMBIC_HEAD, "0006"], "multiple"),
+    ],
+)
+async def test_readyz_rejects_non_current_migration_state(
+    engine, sessionmaker, seeded_db, fake_redis, settings, versions, expected_status
+):
+    """Readiness fails closed for empty, stale, and divergent Alembic state."""
+    async with sessionmaker() as session:
+        await session.execute(text("DELETE FROM alembic_version"))
+        for version in versions:
+            await session.execute(
+                text("INSERT INTO alembic_version (version_num) VALUES (:version)"),
+                {"version": version},
+            )
+        await session.commit()
+
+    app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/readyz")
+
+    expect(response.status_code == 503)
+    body = response.json()
+    expect(body["ok"] == "false")
+    expect(body["db"] == "ok")
+    expect(body["schema"] == expected_status)
+
+
+async def test_readyz_rejects_missing_migration_state(
+    engine, sessionmaker, seeded_db, fake_redis, settings
+):
+    """Readiness fails closed when Alembic has never initialized the database."""
+    async with sessionmaker() as session:
+        await session.execute(text("DROP TABLE alembic_version"))
+        await session.commit()
+
+    app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/readyz")
+
+    expect(response.status_code == 503)
+    expect(response.json()["schema"] == "missing")
+
+
+async def test_health_details_rejects_stale_schema(
+    engine, sessionmaker, seeded_db, fake_redis, settings
+):
+    """Detailed health does not report a stale database schema as healthy."""
+    settings.admin_api_key = TEST_ADMIN_API_KEY
+    async with sessionmaker() as session:
+        await session.execute(text("DELETE FROM alembic_version"))
+        await session.execute(text("INSERT INTO alembic_version (version_num) VALUES ('0006')"))
+        await session.commit()
+
+    app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get(
+                "/healthz/details", headers={"X-Admin-Key": TEST_ADMIN_API_KEY}
+            )
+
+    expect(response.status_code == 503)
+    body = response.json()
+    expect(body["status"] == "unhealthy")
+    expect(body["dependencies"]["database"]["schema"]["status"] == "stale")
+
+
+async def test_health_details_reports_effective_connector_readiness(
+    engine, seeded_db, fake_redis, settings
+):
+    """Connector flags reflect usable configuration, not only enable switches."""
+    settings.admin_api_key = TEST_ADMIN_API_KEY
+    settings.simulation_enabled = True
+    settings.sendxms_enabled = True
+    settings.signal_enabled = True
+
+    app = create_app(settings=settings, injected_engine=engine, injected_redis=fake_redis)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get(
+                "/healthz/details", headers={"X-Admin-Key": TEST_ADMIN_API_KEY}
+            )
+
+    expect(response.status_code == 200)
+    connectors = response.json()["connectors"]
+    expect(connectors["sms"]["enabled"] is False)
+    expect(connectors["signal"]["enabled"] is False)
 
 
 async def test_metrics_returns_prometheus_text_with_alarm_counts(

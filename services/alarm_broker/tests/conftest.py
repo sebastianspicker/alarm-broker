@@ -4,9 +4,11 @@ from collections.abc import AsyncIterator
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from alarm_broker.api.main import create_app
+from alarm_broker.api.routes.health import EXPECTED_ALEMBIC_HEAD
 from alarm_broker.db.base import Base
 from alarm_broker.db.models import Device, Person, Room, Site
 from alarm_broker.db.session import create_sessionmaker
@@ -31,6 +33,13 @@ async def engine(tmp_path) -> AsyncIterator[AsyncEngine]:
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Base.metadata deliberately excludes Alembic's version table. Readiness
+        # must exercise the production migration contract, not merely the ORM schema.
+        await conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+        await conn.execute(
+            text("INSERT INTO alembic_version (version_num) VALUES (:version)"),
+            {"version": EXPECTED_ALEMBIC_HEAD},
+        )
     yield engine
     await engine.dispose()
 

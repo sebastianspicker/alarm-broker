@@ -3,11 +3,10 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Callable, Coroutine
-from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alarm_broker.api.deps import get_redis, get_session, require_admin
@@ -21,15 +20,17 @@ from alarm_broker.api.schemas import (
     TransitionIn,
 )
 from alarm_broker.core.errors import ConflictError
+from alarm_broker.db.json_merge import merge_json_object
 from alarm_broker.db.models import Alarm, AlarmStatus
 from alarm_broker.services.alarm_service import (
     acknowledge_alarm,
     get_alarm_or_404,
+    soft_delete_alarm,
     transition_alarm,
 )
 from alarm_broker.services.event_service import (
-    enqueue_alarm_acked_event,
-    enqueue_alarm_state_changed_event,
+    dispatch_pending_alarm_events,
+    has_pending_alarm_events,
 )
 
 router = APIRouter(prefix="/v1/alarms", dependencies=[Depends(require_admin)])
@@ -127,29 +128,16 @@ async def _execute_bulk_state_transition(
         )
 
     async def after_change(alarm: Alarm) -> None:
-        if is_ack:
-            ack_result = await enqueue_alarm_acked_event(
-                redis,
-                alarm_id=alarm.id,
-                acked_by=actor_or_acked_by,
-                note=note,
-                logger=logger,
-            )
-            if not ack_result.success:
-                logger.warning(
-                    "bulk_ack_event_enqueue_failed",
-                    extra={"alarm_id": str(alarm.id), "error": ack_result.error},
-                )
-        state_result = await enqueue_alarm_state_changed_event(
-            redis,
-            alarm_id=alarm.id,
-            state=alarm.status.value,
-            logger=logger,
+        published = await dispatch_pending_alarm_events(
+            session, redis, logger=logger, alarm_id=alarm.id
         )
-        if not state_result.success:
+        if await has_pending_alarm_events(session, alarm.id):
             logger.warning(
-                "bulk_state_event_enqueue_failed",
-                extra={"alarm_id": str(alarm.id), "error": state_result.error},
+                "bulk_event_delivery_pending",
+                extra={
+                    "alarm_id": str(alarm.id),
+                    "published": published,
+                },
             )
 
     return await _execute_bulk_operation(
@@ -187,29 +175,16 @@ async def _execute_single_state_transition(
 
     if changed:
         redis = get_redis(request)
-        if is_ack:
-            ack_result = await enqueue_alarm_acked_event(
-                redis,
-                alarm_id=alarm.id,
-                acked_by=actor_or_acked_by,
-                note=note,
-                logger=logger,
-            )
-            if not ack_result.success:
-                logger.warning(
-                    "ack_event_enqueue_failed",
-                    extra={"alarm_id": str(alarm.id), "error": ack_result.error},
-                )
-        state_result = await enqueue_alarm_state_changed_event(
-            redis,
-            alarm_id=alarm.id,
-            state=alarm.status.value,
-            logger=logger,
+        published = await dispatch_pending_alarm_events(
+            session, redis, logger=logger, alarm_id=alarm.id
         )
-        if not state_result.success:
+        if await has_pending_alarm_events(session, alarm.id):
             logger.warning(
-                "state_event_enqueue_failed",
-                extra={"alarm_id": str(alarm.id), "error": state_result.error},
+                "event_delivery_pending",
+                extra={
+                    "alarm_id": str(alarm.id),
+                    "published": published,
+                },
             )
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -298,24 +273,26 @@ async def patch_alarm(
 
     patch_data = patch.model_dump(exclude_none=True)
 
-    # NOTE: The meta JSON updates below are not atomic at the database level.
-    # Concurrent PATCH requests to the same alarm may cause a lost-update race
-    # condition where one writer overwrites the other's changes. A fully atomic
-    # approach would use PostgreSQL's jsonb_set via func.jsonb_set, but the ORM
-    # model currently maps meta as a plain dict. For now, callers should be aware
-    # that concurrent partial updates to meta are not safe without external
-    # locking (e.g., SELECT ... FOR UPDATE).
-    if "title" in patch_data:
-        alarm.meta = {**(alarm.meta or {}), "title": patch_data["title"]}
-
-    if "description" in patch_data:
-        alarm.meta = {**(alarm.meta or {}), "description": patch_data["description"]}
-
+    values: dict[str, object] = {}
+    meta_patch = {
+        key: patch_data[key] for key in ("title", "description", "tags") if key in patch_data
+    }
+    if meta_patch:
+        values["meta"] = merge_json_object(
+            Alarm.meta,
+            meta_patch,
+            dialect_name=session.get_bind().dialect.name,
+        )
     if "severity" in patch_data:
-        alarm.severity = patch_data["severity"]
+        values["severity"] = patch_data["severity"]
 
-    if "tags" in patch_data:
-        alarm.meta = {**(alarm.meta or {}), "tags": patch_data["tags"]}
+    if values:
+        await session.execute(
+            update(Alarm)
+            .where(Alarm.id == alarm.id, Alarm.deleted_at.is_(None))
+            .values(values)
+            .execution_options(synchronize_session=False)
+        )
 
     await session.commit()
     await session.refresh(alarm)
@@ -389,16 +366,9 @@ async def delete_alarm(
 
     alarm = await get_alarm_or_404(session, alarm_id)
 
-    if alarm.deleted_at is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Alarm has already been deleted. No action taken.",
-        )
-
-    alarm.deleted_at = datetime.now(UTC)
-
     settings = get_app_settings(request)
-    if settings.admin_api_key:
-        alarm.deleted_by = "admin"
-
-    await session.commit()
+    await soft_delete_alarm(
+        session,
+        alarm,
+        deleted_by="admin" if settings.admin_api_key else None,
+    )

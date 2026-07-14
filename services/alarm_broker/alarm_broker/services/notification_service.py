@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Any
@@ -15,8 +16,12 @@ from alarm_broker import constants
 from alarm_broker.connectors.sendxms import SendXmsClient
 from alarm_broker.connectors.signal import SignalClient
 from alarm_broker.connectors.zammad import ZammadClient
+from alarm_broker.core.errors import ConfigurationError
 from alarm_broker.core.url_validation import (
     SSRFError,
+    pin_url_to_address,
+    redact_url_for_logging,
+    redact_url_in_text,
     validate_url_not_internal,
     validate_webhook_host_allowed,
 )
@@ -26,6 +31,53 @@ from alarm_broker.settings import Settings
 from alarm_broker.types import EnrichedAlarmContext, NotificationPayload
 
 logger = logging.getLogger("alarm_broker")
+
+
+def _webhook_request_options(
+    webhook_url: str, resolved_address: str
+) -> tuple[str, dict[str, str], dict[str, Any]]:
+    """Pin one already-validated webhook address without losing Host/SNI identity."""
+    request_headers = {"Content-Type": "application/json"}
+    request_url, host_header, sni_hostname = pin_url_to_address(webhook_url, resolved_address)
+    request_headers["Host"] = host_header
+    return request_url, request_headers, {"sni_hostname": sni_hostname}
+
+
+async def _post_webhook_to_validated_addresses(
+    webhook_url: str,
+    payload: NotificationPayload,
+    resolved_addresses: tuple[str, ...] | list[str],
+    target_id: str,
+) -> None:
+    """Post within one timeout budget, trying only prevalidated pinned addresses."""
+    last_error: Exception = SSRFError("Webhook URL has no validated global addresses")
+    async with asyncio.timeout(30.0):
+        async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+            for address in resolved_addresses:
+                request_url, request_headers, request_extensions = _webhook_request_options(
+                    webhook_url, address
+                )
+                try:
+                    response = await client.post(
+                        request_url,
+                        json=payload,
+                        headers=request_headers,
+                        extensions=request_extensions,
+                    )
+                    response.raise_for_status()
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning(
+                        "webhook_notification_address_failed",
+                        extra={
+                            "target_id": target_id,
+                            "url": redact_url_for_logging(webhook_url),
+                            "error": redact_url_in_text(str(exc), webhook_url),
+                        },
+                    )
+                    continue
+                return
+    raise last_error
 
 
 async def log_notification(
@@ -46,8 +98,8 @@ async def log_notification(
         channel: Notification channel (zammad, sms, signal)
         target_id: ID of the escalation target (if applicable)
         payload: Payload sent to the channel
-        result: Result of the notification (ok, error)
-        error: Error message if result is error
+        result: Result of the notification (ok, error, skipped)
+        error: Detail for an error or skipped result
     """
     session.add(
         AlarmNotification(
@@ -314,7 +366,7 @@ class NotificationService:
         """
         if not self._zammad.enabled():
             await self._log_notification_result(
-                session, target, payload, "error", "Zammad not enabled"
+                session, target, payload, "skipped", "Zammad not enabled"
             )
             return
 
@@ -358,6 +410,12 @@ class NotificationService:
             message: Message to send
             payload: Full notification payload for logging
         """
+        if not self._signal.enabled():
+            await self._log_notification_result(
+                session, target, payload, "skipped", "Signal not enabled"
+            )
+            return
+
         try:
             await self._signal.send_group_message(message, group_id=target.address)
             await self._log_notification_result(session, target, payload, "ok")
@@ -383,6 +441,12 @@ class NotificationService:
             message: Message to send
             payload: Full notification payload for logging
         """
+        if not self._sendxms.enabled():
+            await self._log_notification_result(
+                session, target, payload, "skipped", "SendXMS not enabled"
+            )
+            return
+
         try:
             await self._sendxms.send_sms(target.address, message)
             await self._log_notification_result(session, target, payload, "ok")
@@ -416,35 +480,51 @@ class NotificationService:
             )
             return
 
+        resolved_addresses = await self._resolve_webhook_addresses(
+            session, target, payload, webhook_url, settings
+        )
+        if resolved_addresses is None:
+            return
+
+        try:
+            await _post_webhook_to_validated_addresses(
+                webhook_url, payload, resolved_addresses, target.id
+            )
+        except Exception as e:
+            safe_error = redact_url_in_text(str(e), webhook_url)
+            logger.error(
+                "webhook_notification_failed",
+                extra={"target_id": target.id, "error": safe_error},
+            )
+            await self._log_notification_result(session, target, payload, "error", safe_error)
+            return
+        await self._log_notification_result(session, target, payload, "ok")
+
+    async def _resolve_webhook_addresses(
+        self,
+        session: AsyncSession,
+        target: EscalationTarget,
+        payload: NotificationPayload,
+        webhook_url: str,
+        settings: Settings | None,
+    ) -> tuple[str, ...] | list[str] | None:
         try:
             allowed_hosts = settings.webhook_allowed_hosts if settings else ""
             validate_webhook_host_allowed(webhook_url, allowed_hosts)
-            await validate_url_not_internal(webhook_url)
+            return await validate_url_not_internal(webhook_url)
         except SSRFError as e:
             logger.warning(
                 "webhook_ssrf_blocked",
-                extra={"target_id": target.id, "url": webhook_url, "error": str(e)},
+                extra={
+                    "target_id": target.id,
+                    "url": redact_url_for_logging(webhook_url),
+                    "error": str(e),
+                },
             )
             await self._log_notification_result(
                 session, target, payload, "error", f"SSRF blocked: {e}"
             )
-            return
-
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    webhook_url,
-                    json=payload,
-                    headers={"Content-Type": "application/json"},
-                )
-                response.raise_for_status()
-            await self._log_notification_result(session, target, payload, "ok")
-        except Exception as e:
-            logger.exception(
-                "webhook_notification_failed",
-                extra={"target_id": target.id, "error": str(e)},
-            )
-            await self._log_notification_result(session, target, payload, "error", str(e))
+            return None
 
     async def _log_notification_result(
         self,
@@ -463,8 +543,8 @@ class NotificationService:
             session: Database session
             target: Target that was notified
             payload: Payload that was sent
-            result: Result status ("ok" or "error")
-            error: Error message if result is error
+            result: Result status ("ok", "error", or "skipped")
+            error: Detail for an error or skipped result
         """
         await log_notification(
             session,
@@ -600,6 +680,14 @@ class NotificationService:
                 .where(EscalationStep.policy_id == policy_id)
                 .where(EscalationStep.step_no > 0)
                 .distinct()
+                .order_by(EscalationStep.step_no, EscalationStep.after_seconds)
             )
         ).all()
-        return [(row[0], row[1]) for row in rows]
+        schedule: dict[int, int] = {}
+        for step_no, after_seconds in rows:
+            previous_delay = schedule.setdefault(step_no, after_seconds)
+            if previous_delay != after_seconds:
+                raise ConfigurationError(
+                    f"Escalation policy {policy_id!r} has conflicting delays for step {step_no}"
+                )
+        return list(schedule.items())

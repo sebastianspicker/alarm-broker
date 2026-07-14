@@ -19,6 +19,10 @@ from alarm_broker.settings import Settings
 
 router = APIRouter()
 
+# Keep this value synchronized with the single Alembic head packaged in
+# services/alarm_broker/alembic/versions. The regression test verifies it.
+EXPECTED_ALEMBIC_HEAD = "0007"
+
 # Application start time for uptime tracking
 _start_time = time.time()
 
@@ -50,13 +54,15 @@ async def readyz(
     """
     db_ok = False
     redis_ok = False
-    details: dict[str, Any] = {"db": "down", "redis": "down"}
+    details: dict[str, Any] = {"db": "down", "redis": "down", "schema": "down"}
 
     try:
         async with sessionmaker() as session:
             await session.execute(text("SELECT 1"))
+            schema_status = await _check_schema_version(session)
         db_ok = True
         details["db"] = "ok"
+        details["schema"] = schema_status["status"]
     except Exception:
         db_ok = False
 
@@ -71,7 +77,7 @@ async def readyz(
     except Exception:
         redis_ok = False
 
-    if db_ok and redis_ok:
+    if db_ok and redis_ok and details["schema"] == "ok":
         return JSONResponse(status_code=status.HTTP_200_OK, content={"ok": "true", **details})
 
     return JSONResponse(
@@ -109,11 +115,11 @@ async def healthz_details(
         "base_url": str(settings.zammad_base_url) if settings.zammad_api_token else None,
     }
     details["connectors"]["sms"] = {
-        "enabled": settings.sendxms_enabled,
-        "provider": "sendxms" if settings.sendxms_enabled else None,
+        "enabled": settings.is_sms_enabled(),
+        "provider": "sendxms" if settings.is_sms_enabled() else None,
     }
     details["connectors"]["signal"] = {
-        "enabled": settings.signal_enabled,
+        "enabled": settings.is_signal_enabled(),
     }
 
     # Determine overall status
@@ -155,27 +161,42 @@ async def _check_database(sessionmaker: async_sessionmaker[AsyncSession]) -> dic
         async with sessionmaker() as session:
             await session.execute(text("SELECT 1"))
 
-            # Get migration version (if alembic_version table exists)
-            migration_version = None
-            try:
-                result = await session.execute(
-                    text("SELECT version_num FROM alembic_version LIMIT 1")
-                )
-                row = result.fetchone()
-                if row:
-                    migration_version = row[0]
-            except SQLAlchemyError:
-                migration_version = None
+            schema_status = await _check_schema_version(session)
 
             return {
-                "status": "ok",
-                "migration_version": migration_version,
+                "status": "ok" if schema_status["status"] == "ok" else "error",
+                "schema": schema_status,
             }
     except Exception as e:
         return {
             "status": "error",
             "error": str(e),
         }
+
+
+async def _check_schema_version(session: AsyncSession) -> dict[str, Any]:
+    """Return a fail-closed status for the database's Alembic revision."""
+    try:
+        result = await session.execute(text("SELECT version_num FROM alembic_version"))
+    except SQLAlchemyError:
+        return {"status": "missing", "expected": EXPECTED_ALEMBIC_HEAD}
+
+    versions = [str(version) for version in result.scalars().all()]
+    if not versions:
+        return {"status": "empty", "expected": EXPECTED_ALEMBIC_HEAD}
+    if len(versions) != 1:
+        return {
+            "status": "multiple",
+            "expected": EXPECTED_ALEMBIC_HEAD,
+            "actual": versions,
+        }
+    if versions[0] != EXPECTED_ALEMBIC_HEAD:
+        return {
+            "status": "stale",
+            "expected": EXPECTED_ALEMBIC_HEAD,
+            "actual": versions[0],
+        }
+    return {"status": "ok", "expected": EXPECTED_ALEMBIC_HEAD, "actual": versions[0]}
 
 
 async def _check_redis(request: Request) -> dict[str, Any]:

@@ -6,11 +6,23 @@ All configuration is loaded from environment variables (and optional .env file).
 from __future__ import annotations
 
 from functools import lru_cache
+from urllib.parse import unquote, urlparse
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _YEALINK_TRIGGER_QUERY_KEY = "".join(("tok", "en"))
+
+
+def _require_http_url(value: str, variable_name: str) -> None:
+    """Require an activated connector endpoint to have an HTTP(S) host."""
+    try:
+        parsed = urlparse(value)
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"{variable_name} must be an http/https URL with a hostname") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError(f"{variable_name} must be an http/https URL with a hostname")
 
 
 class Settings(BaseSettings):
@@ -105,7 +117,8 @@ class Settings(BaseSettings):
             import warnings
 
             warnings.warn(
-                "ADMIN_API_KEY is not set. Admin endpoints will return 500 errors.",
+                "ADMIN_API_KEY is not set. Admin access is unavailable "
+                "(API endpoints return 403; browser login returns 500).",
                 UserWarning,
                 stacklevel=2,
             )
@@ -127,6 +140,78 @@ class Settings(BaseSettings):
                 "Set a strong key or enable simulation mode for development."
             )
         return self
+
+    @model_validator(mode="after")
+    def validate_production_connector_and_database_settings(self) -> Settings:
+        """Require complete connector and database settings outside simulation."""
+        if self.simulation_enabled:
+            return self
+
+        self._validate_sendxms_settings()
+        self._validate_signal_settings()
+        self._validate_zammad_settings()
+        self._validate_webhook_settings()
+        self._reject_default_database_password()
+        return self
+
+    def _validate_sendxms_settings(self) -> None:
+        if not self.sendxms_enabled:
+            return
+        if not self.sendxms_api_key.strip():
+            raise ValueError("SENDXMS_API_KEY is required when SENDXMS_ENABLED=true")
+        _require_http_url(self.sendxms_base_url, "SENDXMS_BASE_URL")
+        if urlparse(self.sendxms_base_url).hostname == "api.sendxms.tld":
+            raise ValueError("SENDXMS_BASE_URL must not use the reserved default endpoint")
+
+    def _validate_signal_settings(self) -> None:
+        if not self.signal_enabled:
+            return
+        if not self.signal_target_group_id.strip():
+            raise ValueError("SIGNAL_TARGET_GROUP_ID is required when SIGNAL_ENABLED=true")
+        _require_http_url(self.signal_cli_endpoint, "SIGNAL_CLI_ENDPOINT")
+
+    def _validate_zammad_settings(self) -> None:
+        if not self.zammad_api_token:
+            return
+        _require_http_url(self.zammad_base_url, "ZAMMAD_BASE_URL")
+        if urlparse(self.zammad_base_url).hostname == "zammad.example.org":
+            raise ValueError("ZAMMAD_BASE_URL must not use the reserved default endpoint")
+
+    def _validate_webhook_settings(self) -> None:
+        if not self.webhook_enabled:
+            return
+        if not self.webhook_url.strip():
+            raise ValueError("WEBHOOK_URL is required when WEBHOOK_ENABLED=true")
+        _require_http_url(self.webhook_url, "WEBHOOK_URL")
+        allowed_hosts = self.webhook_allowed_hosts.split(",")
+        if not any(host.strip() for host in allowed_hosts):
+            raise ValueError("WEBHOOK_ALLOWED_HOSTS is required when WEBHOOK_ENABLED=true")
+        hostname = urlparse(self.webhook_url).hostname
+        if not hostname or hostname.lower() not in {host.strip().lower() for host in allowed_hosts}:
+            raise ValueError("WEBHOOK_URL host must be listed in WEBHOOK_ALLOWED_HOSTS")
+
+    def _reject_default_database_password(self) -> None:
+        # The package-level ASGI app is imported before deployment configuration
+        # is loaded in several tooling paths. Reject an explicitly supplied
+        # default credential while leaving that import-time placeholder inert.
+        if "database_url" in self.model_fields_set and self._uses_default_database_password():
+            raise ValueError(self._default_database_password_message())
+
+    def _uses_default_database_password(self) -> bool:
+        parsed_database_url = urlparse(self.database_url)
+        return unquote(parsed_database_url.password or "") == "change-me"
+
+    @staticmethod
+    def _default_database_password_message() -> str:
+        return (
+            "Refusing to start with the default DATABASE_URL password. "
+            "Set a non-default password or enable simulation mode for development."
+        )
+
+    def validate_runtime_configuration(self) -> None:
+        """Fail closed before a real API, worker, or migration process starts."""
+        if not self.simulation_enabled and self._uses_default_database_password():
+            raise ValueError(self._default_database_password_message())
 
     @model_validator(mode="after")
     def warn_empty_ip_allowlist(self) -> Settings:

@@ -6,9 +6,10 @@ import json
 from typing import Any
 
 import yaml
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from alarm_broker.core.errors import ValidationError
+from alarm_broker.core.errors import ConflictError, ValidationError
 from alarm_broker.seed import apply_seed
 from alarm_broker.settings import Settings
 
@@ -56,6 +57,9 @@ async def apply_seed_payload(
     """Apply parsed seed data and translate structure errors to domain validation."""
     try:
         await apply_seed(session, data, settings)
+    except IntegrityError as exc:
+        await session.rollback()
+        raise ConflictError("Seed data conflicts with a concurrent or referenced resource") from exc
     except (KeyError, TypeError, ValueError) as exc:
         await session.rollback()
         raise ValidationError("Invalid seed structure or values") from exc

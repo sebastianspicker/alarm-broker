@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alarm_broker.api.schemas import (
@@ -8,17 +9,49 @@ from alarm_broker.api.schemas import (
     StepIn,
     TargetIn,
 )
-from alarm_broker.core.errors import ValidationError
+from alarm_broker.core.errors import ConflictError, ValidationError
 from alarm_broker.db.models import EscalationPolicy, EscalationStep, EscalationTarget
 
 
-async def _upsert_policy(session: AsyncSession, body: EscalationPolicyIn) -> None:
-    policy = await session.get(EscalationPolicy, body.policy_id)
-    if not policy:
-        policy = EscalationPolicy(id=body.policy_id, name=body.name)
-        session.add(policy)
-    else:
-        policy.name = body.name
+async def _upsert_policy(
+    session: AsyncSession,
+    body: EscalationPolicyIn,
+    *,
+    expected_version: int | None,
+) -> None:
+    """Create or atomically advance the policy version before replacing its contents."""
+    if expected_version == 0:
+        session.add(EscalationPolicy(id=body.policy_id, name=body.name, version=1))
+        try:
+            await session.flush()
+        except IntegrityError as exc:
+            await session.rollback()
+            raise ConflictError("Policy has changed since it was loaded") from exc
+        return
+
+    conditions = [EscalationPolicy.id == body.policy_id]
+    if expected_version is not None:
+        conditions.append(EscalationPolicy.version == expected_version)
+
+    result = await session.execute(
+        update(EscalationPolicy)
+        .where(*conditions)
+        .values(name=body.name, version=EscalationPolicy.version + 1)
+    )
+    if bool(getattr(result, "rowcount", 0)):
+        return
+
+    if expected_version is not None:
+        raise ConflictError("Policy has changed since it was loaded")
+
+    # The API upsert has no client-supplied version. Create only when no row
+    # exists; a concurrent creator is retried by the caller as an update.
+    session.add(EscalationPolicy(id=body.policy_id, name=body.name, version=1))
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise ConflictError("Policy changed while it was being updated") from exc
 
 
 async def _upsert_policy_targets(session: AsyncSession, targets: list[TargetIn]) -> None:
@@ -44,6 +77,7 @@ async def _upsert_policy_targets(session: AsyncSession, targets: list[TargetIn])
 
 def _validate_step_duplicates(steps: list[StepIn]) -> None:
     seen_pairs: set[tuple[int, str]] = set()
+    delays_by_step: dict[int, int] = {}
     for step in steps:
         if len(step.target_ids) != len(set(step.target_ids)):
             raise ValidationError(f"Duplicate target ids in step {step.step_no}")
@@ -54,6 +88,13 @@ def _validate_step_duplicates(steps: list[StepIn]) -> None:
                 duplicate_pair = f"step {step.step_no}, target {target_id}"
                 raise ValidationError(f"Duplicate step/target pair: {duplicate_pair}")
             seen_pairs.add(pair)
+
+        previous_delay = delays_by_step.setdefault(step.step_no, step.after_seconds)
+        if previous_delay != step.after_seconds:
+            raise ValidationError(
+                f"Conflicting after_seconds values for step {step.step_no}: "
+                f"{previous_delay} and {step.after_seconds}"
+            )
 
 
 async def _validate_referenced_targets(
@@ -100,11 +141,25 @@ async def _replace_policy_steps(
             )
 
 
-async def apply_escalation_policy(session: AsyncSession, body: EscalationPolicyIn) -> str:
-    await _upsert_policy(session, body)
+async def apply_escalation_policy(
+    session: AsyncSession,
+    body: EscalationPolicyIn,
+    *,
+    expected_version: int | None = None,
+) -> str:
+    """Persist a policy and advance its version for every successful write.
+
+    Browser edits provide ``expected_version`` for compare-and-swap semantics;
+    API upserts omit it and atomically advance the current version instead.
+    """
+    await _upsert_policy(session, body, expected_version=expected_version)
     await _upsert_policy_targets(session, body.targets)
     _validate_step_duplicates(body.steps)
     await _validate_referenced_targets(session, targets=body.targets, steps=body.steps)
     await _replace_policy_steps(session, policy_id=body.policy_id, steps=body.steps)
-    await session.commit()
-    return body.policy_id
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise ConflictError("Policy references changed while it was being updated") from exc
+    return str(body.policy_id)

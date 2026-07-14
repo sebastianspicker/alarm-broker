@@ -85,13 +85,13 @@ async def test_alarm_state_changed_posts_webhook_and_logs_result(
     http = httpx.AsyncClient()
     ctx = _worker_ctx(sessionmaker, settings, http)
 
-    async def allow_webhook(_url: str) -> None:
-        return None
+    async def allow_webhook(_url: str) -> tuple[str, ...]:
+        return ("1.1.1.1",)
 
     monkeypatch.setattr("alarm_broker.worker.tasks.validate_url_not_internal", allow_webhook)
 
     with respx.mock(assert_all_called=True) as mock_router:
-        route = mock_router.post("https://hooks.example.test/alarm").respond(200, json={"ok": True})
+        route = mock_router.post("https://1.1.1.1/alarm").respond(200, json={"ok": True})
         await alarm_state_changed(ctx, str(alarm_id), "triggered")
         expect(route.called)
 
