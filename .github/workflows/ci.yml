@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
+    inputs:
+      release_smoke:
+        description: Run the built-container migration and readiness smoke test.
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -41,7 +48,7 @@ jobs:
         run: ruff check services/alarm_broker
 
       - name: Type check
-        run: python -m mypy services/alarm_broker/alarm_broker
+        run: python -m mypy --config-file services/alarm_broker/pyproject.toml services/alarm_broker/alarm_broker
 
   test:
     runs-on: ubuntu-latest
@@ -212,7 +219,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [lint, test, e2e, postgres-smoke, security, package]
     timeout-minutes: 15
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: inputs.release_smoke || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -233,3 +240,81 @@ jobs:
 
       - name: Verify image
         run: docker images | grep alarm-broker
+
+      - name: Generate smoke credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          export RUNTIME_TOKEN="$(openssl rand -hex 32)"
+          export DATABASE_TOKEN="$(openssl rand -hex 32)"
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          database_token = os.environ["DATABASE_TOKEN"]
+          values = (
+              ("ADMIN_API_" + "KEY", os.environ["RUNTIME_TOKEN"]),
+              ("POSTGRES_" + "PASSWORD", database_token),
+              ("DATABASE_" + "URL", f"postgresql+asyncpg://alarm:{database_token}@release-smoke-postgres:5432/alarm"),
+          )
+          destination = Path(os.environ["GITHUB_ENV"])
+          with destination.open("a", encoding="utf-8") as output:
+              output.writelines(f"{name}={value}\n" for name, value in values)
+          PY
+
+      - name: Start blank PostgreSQL and Redis
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker network create release-smoke
+          docker run --detach --name release-smoke-postgres --network release-smoke \
+            --env POSTGRES_DB=alarm --env POSTGRES_USER=alarm --env POSTGRES_PASSWORD \
+            postgres:16
+          docker run --detach --name release-smoke-redis --network release-smoke redis:7
+          for attempt in {1..30}; do
+            if docker exec release-smoke-postgres pg_isready -U alarm -d alarm; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs release-smoke-postgres
+          exit 1
+
+      - name: Migrate blank PostgreSQL with the built image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network release-smoke \
+            --env DATABASE_URL --env REDIS_URL=redis://release-smoke-redis:6379/0 \
+            --env ADMIN_API_KEY \
+            --env YELK_IP_ALLOWLIST=127.0.0.1/32 \
+            alarm-broker:dev alembic upgrade head
+
+      - name: Start and probe the tested image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --detach --name release-smoke-api --network release-smoke \
+            --publish 127.0.0.1:8080:8080 \
+            --env DATABASE_URL --env REDIS_URL=redis://release-smoke-redis:6379/0 \
+            --env ADMIN_API_KEY \
+            --env YELK_IP_ALLOWLIST=127.0.0.1/32 \
+            alarm-broker:dev
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error http://127.0.0.1:8080/readyz; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs release-smoke-api
+          exit 1
+
+      - name: Collect smoke logs and clean up
+        if: always()
+        shell: bash
+        run: |
+          docker logs release-smoke-api || true
+          docker logs release-smoke-postgres || true
+          docker logs release-smoke-redis || true
+          docker rm --force release-smoke-api release-smoke-postgres release-smoke-redis || true
+          docker network rm release-smoke || true

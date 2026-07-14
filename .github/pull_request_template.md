@@ -21,7 +21,7 @@
 <!-- List exact commands run and results. If skipped, explain why. -->
 
 - [ ] `make lint`
-- [ ] `python -m mypy services/alarm_broker/alarm_broker`
+- [ ] `python -m mypy --config-file services/alarm_broker/pyproject.toml services/alarm_broker/alarm_broker`
 - [ ] `make test`
 - [ ] `make e2e` when user-facing HTTP/browser flows changed
 - [ ] `make test-postgres-smoke` when DB models, migrations, or persistence behavior changed

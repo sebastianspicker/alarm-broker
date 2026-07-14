@@ -28,17 +28,17 @@ It is not validated for safety-critical, security-critical, or compliance-critic
 
 2. API validates:
 - source IP allowlist,
-- idempotency bucket,
+- idempotency lease,
 - per-token rate limits,
 - device mapping consistency.
 
-3. API persists `alarms` row with `status=triggered`, `ack_token`, metadata, then enqueues `alarm_created`.
+3. API persists an `alarms` row with `status=triggered`, `ack_token`, and metadata, then enqueues the initial alarm events.
 
 4. Worker enriches alarm context (person/room/site), sends stage 0 notifications, and schedules escalation jobs.
 
 5. ACK flow:
 - `GET /a/{ack_token}` renders responder page,
-- `POST /a/{ack_token}` acknowledges alarm and enqueues `alarm_acked`.
+- `POST /a/{ack_token}` acknowledges the alarm and records its follow-up events in the transactional outbox before dispatch.
 
 6. Admin lifecycle/API:
 - `POST /v1/alarms/{alarm_id}/ack`
@@ -74,7 +74,7 @@ Repeated transition to same target state is idempotent (`204`).
 Core tables:
 - **Master data**: versioned `sites`, `rooms` (FK sites), `persons`, and `devices` (token mapping), with explicit active state
 - **Escalation config**: versioned `escalation_policy`, `escalation_targets`, and `escalation_steps` (composite PK: policy_id, step_no, target_id)
-- **Alarms**: `alarms` (UUID PK, status lifecycle, context, integration fields, JSON meta)
+- **Alarms**: `alarms` (UUID PK, status lifecycle, context, integration fields, JSON meta) and `alarm_event_outbox` (durable lifecycle-event delivery)
 - **Audit**: `alarm_notifications`, immutable `alarm_notes`, and redacted `admin_audit_events`
 
 `devices.device_token` is the inbound trigger anchor. `alarms.ack_token` provides the capability URL.
@@ -99,21 +99,25 @@ The main vertical slice is:
 
 1. `api/main.py` creates the FastAPI app, installs security/observability middleware, opens DB/Redis resources, and registers routes.
 2. `api/routes/yealink.py` handles the external trigger request and delegates all business logic to `TriggerService`.
-3. `services/trigger_service.py` validates the trigger, reserves a Redis idempotency key, persists the alarm row, and records event-delivery state in `alarm.meta`.
-4. `services/event_publisher.py` converts service events into ARQ jobs for the worker. Its `JOB_NAME` and payload fields are a wire contract with `worker/tasks.py`.
-5. `worker/tasks.py` dispatches ARQ events to notification fan-out, delayed escalations, ACK follow-up notes, state-change webhooks, and event-delivery recovery.
-6. `services/notification_service.py` builds user-facing messages and writes one `alarm_notifications` audit row per channel attempt.
+3. `services/trigger_service.py` validates the trigger, reserves a Redis idempotency lease, persists the alarm row, and records initial event-delivery state in `alarm.meta`.
+4. `services/alarm_service.py` applies lifecycle transitions with compare-and-set updates and writes their follow-up events to `alarm_event_outbox` in the same transaction.
+5. `services/event_publisher.py` converts service events into ARQ jobs for the worker. Its `JOB_NAME` and payload fields are a wire contract with `worker/tasks.py`.
+6. `worker/tasks.py` dispatches ARQ events to notification fan-out, delayed escalations, ACK follow-up notes, state-change webhooks, and both initial-event and outbox recovery.
+7. `services/notification_service.py` builds user-facing messages and writes one `alarm_notifications` audit row per channel attempt.
 
 The ACK flow starts in `api/routes/ack.py`, but uses the same state-transition helpers in `services/alarm_service.py` and the same event publisher wrappers in `services/event_service.py`.
 
 ## Internal invariants
 
 - Device tokens are secrets. Logs use short SHA-256 token hashes, and trigger errors avoid distinguishing unknown tokens from incomplete mappings.
-- The Redis idempotency key is scoped to a 10-second bucket. It stores the pre-reserved alarm UUID so rapid duplicate trigger requests can return the same alarm once persistence catches up.
+- The Redis idempotency lease is derived from the stable SHA-256 hash of the device token and lasts 30 seconds. It stores the pre-reserved alarm UUID so duplicates cannot cross a time-bucket boundary and create a second alarm while the lease is active.
 - `alarm.meta.event_delivery` is recovery state, not business history. It records whether the trigger-side `alarm.created` and initial `alarm.state_changed` jobs were queued; `recover_incomplete_alarm_events` uses it to retry after transient Redis/worker failures.
+- Lifecycle transitions write durable `alarm_event_outbox` rows in the same database transaction as the state change. The same recovery task retries unpublished rows after Redis or worker-queue failures.
 - Resolve and cancel are alarm states, not separate worker event types. Downstream webhooks receive them through the generic `alarm.state_changed` event with `new_state`.
 - Notification delivery is best effort per channel. Failures are logged in `alarm_notifications` and metrics, but one failing connector should not block other channels.
-- `ack_token` is a capability URL. It is never logged as a raw path segment and the ACK page is sent with `Cache-Control: no-store`.
+- `ack_token` is a capability URL. The canonical Uvicorn runtime disables raw access logs,
+  upstream proxies must suppress or redact request targets, application logs mask the path, and
+  the ACK page is sent with `Cache-Control: no-store`.
 - Inactive device or dependent master-data mappings fail through the same generic trigger response as unknown mappings.
 - Device tokens and escalation target addresses are write-only or masked in operator views and redacted from administrative audit events.
 

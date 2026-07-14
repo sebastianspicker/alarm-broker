@@ -11,21 +11,19 @@
 ```bash
 # 1. Create environment file
 cp .env.example .env
-# Edit .env: set ADMIN_API_KEY, DATABASE_URL, REDIS_URL, BASE_URL
+# Edit .env: set POSTGRES_PASSWORD, ADMIN_API_KEY, DATABASE_URL, REDIS_URL, BASE_URL
 
-# 2. Start services
+# 2. Build the application image, run its one-shot migration, then start API and worker.
+# API and worker will not start until the migration service has completed successfully.
 docker compose -f deploy/docker-compose.yml up -d --build
 
-# 3. Run database migrations
-docker compose -f deploy/docker-compose.yml exec api alembic upgrade head
-
-# 4. Load seed data
+# 3. Load seed data
 curl -sS -X POST "http://localhost:8080/v1/admin/seed" \
   -H "X-Admin-Key: your-admin-key" \
   -H "Content-Type: application/x-yaml" \
   --data-binary @deploy/seed.example.yaml
 
-# 5. Verify
+# 4. Verify (returns 503 until the database revision is current)
 curl -sS http://localhost:8080/readyz | jq .
 ```
 
@@ -43,7 +41,7 @@ make test
 
 ```bash
 make lint                    # Ruff format check and lint
-python -m mypy services/alarm_broker/alarm_broker
+python -m mypy --config-file services/alarm_broker/pyproject.toml services/alarm_broker/alarm_broker
 make hygiene-check           # Public-file boundary and private-path check
 make audit                   # Ruff, Bandit, and project-scoped pip-audit
 make package-check           # Build the Python wheel
@@ -61,14 +59,20 @@ make clean                   # Remove generated caches and build outputs
 ## Database Migrations
 
 ```bash
-# Create new migration
-docker compose -f deploy/docker-compose.yml exec api alembic revision --autogenerate -m "description"
+# Create a new migration from the local service development environment.
+# The one-shot container is read-only and cannot persist a generated revision.
+cd services/alarm_broker
+.venv/bin/alembic revision --autogenerate -m "description"
+cd ../..
 
-# Apply migrations
-docker compose -f deploy/docker-compose.yml exec api alembic upgrade head
+# Apply migrations from the built image. `run` returns Alembic's exit code.
+docker compose -f deploy/docker-compose.yml build migration
+docker compose -f deploy/docker-compose.yml up -d --wait postgres
+docker compose -f deploy/docker-compose.yml run --rm --no-deps migration
 
-# Rollback
-docker compose -f deploy/docker-compose.yml exec api alembic downgrade -1
+# Rollback from the image (the command returns Alembic's exit code)
+docker compose -f deploy/docker-compose.yml build migration
+docker compose -f deploy/docker-compose.yml run --rm migration alembic downgrade -1
 ```
 
 ## Production Deployment
@@ -88,6 +92,8 @@ GRANT ALL ON SCHEMA public TO alarm;
 2. **Firewall** - Only expose port 80/443
 3. **Secrets** - Use Docker secrets or external secret management
 4. **Non-root** - Run containers as non-root user
+5. **Access logs** - Disable or redact proxy request-target logging; trigger query strings and
+   `/a/{token}` paths contain bearer capabilities
 
 ### Reverse Proxy (nginx)
 
@@ -100,6 +106,9 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/yourdomain.com/privkey.pem;
 
     location / {
+        # Do not record raw trigger query strings or ACK capability paths.
+        # The application emits structured, token-safe request metadata.
+        access_log off;
         proxy_pass http://localhost:8080;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -114,9 +123,13 @@ server {
 ```bash
 pg_dump -U alarm -h localhost alarm > backup_$(date +%Y%m%d).sql  # Backup first
 git pull
-docker compose -f deploy/docker-compose.yml build
-docker compose -f deploy/docker-compose.yml exec api alembic upgrade head
-docker compose -f deploy/docker-compose.yml restart
+docker compose -f deploy/docker-compose.yml build migration
+# Wait for PostgreSQL, then run migrations from the new image.
+# `run` returns Alembic's exit code without stopping PostgreSQL.
+docker compose -f deploy/docker-compose.yml up -d --wait postgres
+docker compose -f deploy/docker-compose.yml run --rm --no-deps migration
+# Replace old application containers with the newly built image only after migration succeeds.
+docker compose -f deploy/docker-compose.yml up -d --no-deps --force-recreate api worker
 ```
 
 ## Configuration Reference
@@ -164,7 +177,7 @@ alarm-broker/
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/healthz` | GET | Liveness check |
-| `/readyz` | GET | Readiness check (DB + Redis) |
+| `/readyz` | GET | Readiness check (DB, Redis, and current Alembic schema) |
 | `/healthz/details` | GET | Detailed dependency and connector status |
 | `/v1/yealink/alarm` | GET | Yealink alarm trigger |
 | `/a/{ack_token}` | GET/POST | Alarm acknowledgment UI |

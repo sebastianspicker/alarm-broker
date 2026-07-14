@@ -18,9 +18,11 @@ import httpx
 import pytest
 import pytest_asyncio
 import uvicorn
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from alarm_broker.api.main import create_app
+from alarm_broker.api.routes.health import EXPECTED_ALEMBIC_HEAD
 from alarm_broker.db.base import Base
 from alarm_broker.db.models import Alarm
 from alarm_broker.db.session import create_sessionmaker
@@ -67,6 +69,11 @@ async def served_app(tmp_path: Path) -> AsyncIterator[ServedApp]:
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+        await conn.execute(
+            text("INSERT INTO alembic_version (version_num) VALUES (:version)"),
+            {"version": EXPECTED_ALEMBIC_HEAD},
+        )
 
     settings = Settings(
         database_url=f"sqlite+aiosqlite:///{db_path}",

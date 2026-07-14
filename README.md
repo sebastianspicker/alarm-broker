@@ -75,12 +75,12 @@ sequenceDiagram
   participant SIG as Signal endpoint
 
   Y->>API: GET /v1/yealink/alarm?token=DEVICE_TOKEN
-  API->>R: GET idemp:sha256(token:bucket_10s)
+  API->>R: GET idemp:sha256(token)
   alt idempotency key exists
     R-->>API: alarm_id (existing)
     API->>PG: SELECT alarms.id (by alarm_id)
     API-->>Y: 200 {alarm_id, status}
-  else first request in bucket
+  else no active idempotency lease
     API->>R: SET idemp:* = alarm_uuid NX EX 30
     API->>R: INCR rl:token:minute_bucket (+ EXPIRE)
     alt rate limit exceeded
@@ -222,24 +222,21 @@ The core state transition rules live in `services/alarm_service.py`; the SQLAlch
 ```bash
 # 1. Configure environment
 cp .env.example .env
-# Set ADMIN_API_KEY and YEALINK_DEVICE_TOKEN in .env before loading seed data.
+# Set POSTGRES_PASSWORD, ADMIN_API_KEY, DATABASE_URL, and YEALINK_DEVICE_TOKEN in .env.
 
-# 2. Start all services (API + PostgreSQL + Redis + Worker)
+# 2. Build and start all services. The one-shot migration runs before API and worker.
 docker compose -f deploy/docker-compose.yml up -d --build
 
-# 3. Run database migrations
-docker compose -f deploy/docker-compose.yml exec api alembic upgrade head
-
-# 4. Load example seed data (devices, persons, rooms, escalation policy)
+# 3. Load example seed data (devices, persons, rooms, escalation policy)
 curl -sS -X POST "http://localhost:8080/v1/admin/seed" \
   -H "X-Admin-Key: <admin-api-key>" \
   -H "Content-Type: application/x-yaml" \
   --data-binary @deploy/seed.example.yaml
 
-# 5. Trigger a test alarm
+# 4. Trigger a test alarm
 curl -sS "http://localhost:8080/v1/yealink/alarm?token=<device-token>" | jq .
 
-# 6. Check readiness
+# 5. Check readiness (returns 503 until DB, Redis, and the current schema are ready)
 curl -sS "http://localhost:8080/readyz" | jq .
 ```
 
@@ -276,7 +273,7 @@ Notes:
 
 ```bash
 make lint       # ruff format + check
-python -m mypy services/alarm_broker/alarm_broker
+python -m mypy --config-file services/alarm_broker/pyproject.toml services/alarm_broker/alarm_broker
 make hygiene-check # reject private/generated files from the public candidate
 make test       # pytest with coverage (threshold: 93%)
 make e2e        # served HTTP E2E flow with temp SQLite + fake Redis

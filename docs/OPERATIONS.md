@@ -9,7 +9,7 @@ safety-critical, security-critical, or compliance-critical deployment.
 ### Health Endpoints
 
 - `/healthz` - Liveness probe (basic health check)
-- `/readyz` - Readiness probe (includes DB and Redis connectivity)
+- `/readyz` - Readiness probe (requires DB, Redis, and exactly the current Alembic schema head)
 
 ```bash
 # Check health
@@ -120,6 +120,10 @@ must permit `EVAL` for this application. Do not replace that permission with a
 client-side get/delete sequence: it loses the atomicity that prevents a changed
 value from being deleted. Verify the permission during deployment with the
 application account and monitor Redis command-denied errors.
+
+HTTP reverse proxies must not log raw request targets for this service. Yealink
+trigger credentials are query parameters and ACK credentials are path segments;
+disable access logs or apply route-aware redaction before logs leave the proxy.
 
 ### Automated Backups
 
@@ -265,11 +269,16 @@ Before running migrations, backup:
 # Backup
 pg_dump -U alarm -h localhost -Fc alarm > pre_migration_$(date +%Y%m%d).dump
 
-# Run migration
-docker compose exec api alembic upgrade head
+# Run migration from the newly built application image. `run` returns Alembic's exit code.
+docker compose -f deploy/docker-compose.yml build migration
+docker compose -f deploy/docker-compose.yml up -d --wait postgres
+docker compose -f deploy/docker-compose.yml run --rm --no-deps migration
 
 # Verify
-docker compose exec api alembic current
+docker compose -f deploy/docker-compose.yml run --rm migration alembic current
+
+# Recreate API and worker from the new image after a successful migration
+docker compose -f deploy/docker-compose.yml up -d --no-deps --force-recreate api worker
 ```
 
 ### Log Rotation
