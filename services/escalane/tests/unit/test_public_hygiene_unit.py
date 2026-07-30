@@ -20,11 +20,14 @@ from scripts.verify_public_hygiene import _content_reason, _path_reason  # noqa:
         ("private/notes.md", "local-only workspace or report path"),
         ("vendor/copied-source.py", "local-only workspace or report path"),
         ("backups/alarm.dump", "local-only workspace or report path"),
-        ("service/build/output.txt", "generated dependency, cache, report, or build directory"),
+        (
+            "service/build/output.txt",
+            "generated dependency, cache, report, or build directory",
+        ),
         ("credentials.json", "local-only or credential filename"),
         ("capture.har", "sensitive or generated file extension"),
         ("deploy/docker-compose.override.yml", "local-only or credential filename"),
-        ("docs/assets/screenshots/admin.png", "regenerated screenshot asset"),
+        ("docs/assets/screenshots/admin.png", "unreviewed screenshot asset"),
     ],
 )
 def test_public_hygiene_rejects_private_or_generated_paths(
@@ -39,7 +42,7 @@ def test_public_hygiene_rejects_private_or_generated_paths(
         ".env.example",
         "PRODUCT.md",
         "docs/FRONTEND.md",
-        "services/alarm_broker/alarm_broker/api/assets/ui.css",
+        "services/escalane/escalane/api/assets/ui.css",
     ],
 )
 def test_public_hygiene_accepts_public_paths(relative_path: str) -> None:
