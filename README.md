@@ -103,6 +103,12 @@ installation procedure.
 
 ## Browser interface
 
+Explore the sanitized, command-safe
+[static product demo](https://sebastianspicker.github.io/escalane/). It is a
+small click-through of the operator and responder workflow; every
+command-capable action is visibly marked as simulated and runs only in the
+browser.
+
 ![Operator alarm worklist with two triggered alarms, status totals, filters, and bulk actions](docs/assets/screenshots/01-admin-overview.png)
 
 ![Triggered alarm detail with context, delivery activity, lifecycle actions, and note entry](docs/assets/screenshots/04-admin-alarm-detail.png)
