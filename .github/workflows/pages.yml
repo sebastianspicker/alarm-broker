@@ -29,6 +29,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+        with:
+          enablement: true
       - name: Build static demo
         run: python scripts/build_pages.py
       - name: Validate static demo
