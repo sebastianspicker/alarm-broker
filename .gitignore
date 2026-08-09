@@ -77,6 +77,7 @@ build/
 # Local working artifacts
 /plans/
 /progress.md
+/WIP.md
 /reports/
 /scratch/
 /tmp/
@@ -113,8 +114,8 @@ trace.zip
 /.claude/
 /.agents/
 /.codex/
-/.codegraph/
 /.continue/
+/.codegraph/
 /.cursor/
 /.kilo/
 /.serena/
