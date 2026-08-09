@@ -120,11 +120,13 @@ trace.zip
 /.serena/
 /.windsurf/
 /.impeccable/
+/.repowise/
 /.codacy/cli-config.yaml
 /.codacy/codacy.yaml
 /.codacy/generated/
 /.codacy/logs/
 /.codacy/tools-configs/
+/.mcp.json
 /.github/codex/
 /.github/workflows/codex.yml
 /.github/copilot-instructions.md
