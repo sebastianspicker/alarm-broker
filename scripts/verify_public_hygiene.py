@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Reject private or generated files from the public repository candidate.
 
 The candidate includes tracked files and non-ignored untracked files. Ignored
