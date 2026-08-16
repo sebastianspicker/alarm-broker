@@ -128,7 +128,6 @@ trace.zip
 /.impeccable/
 .repowise/
 /.codacy/cli-config.yaml
-/.codacy/codacy.yaml
 /.codacy/generated/
 /.codacy/logs/
 /.codacy/tools-configs/
