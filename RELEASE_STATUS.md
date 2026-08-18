@@ -1,6 +1,6 @@
 # Release status
 
-Evidence cutoff: 2026-08-14, current uncommitted local checkout
+Evidence cutoff: 2026-08-14, local checkout
 
 Verdict: local alpha candidate, not ready to tag
 
@@ -10,7 +10,7 @@ Verdict: local alpha candidate, not ready to tag
 - Proposed tag: `v0.4.0-alpha.1`
 - Python distribution: `escalane`
 - Container repository: `ghcr.io/sebastianspicker/escalane`
-- Current checkout: uncommitted and not an immutable release identity
+- Current checkout: not designated as an immutable release identity
 - Published artifact: none recorded in this checkout
 
 ## Implemented scope
@@ -43,7 +43,7 @@ evidence and must be replaced by results from the immutable candidate commit.
 
 ## Repository gates
 
-- Review and freeze the complete working tree.
+- Review and freeze the complete candidate tree.
 - Install the pinned Playwright browser binaries and rerun the Chromium,
   Firefox, and WebKit E2E cases. The served-HTTP E2E case passed locally, but
   all three browser launches were blocked by missing executables.
