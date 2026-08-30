@@ -46,6 +46,7 @@ dev = [
   "types-PyYAML>=6.0",
   "pytest>=8.3",
   "pytest-asyncio>=0.24",
+  "respx>=0.22",
   "coverage>=7.6",
   "aiosqlite>=0.20",
   "bandit>=1.7",
