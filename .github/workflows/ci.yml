@@ -103,7 +103,7 @@ jobs:
           python -m coverage report
 
       - name: Exercise PostgreSQL migrations and outbox concurrency
-        run: make test-postgres-smoke
+        run: make test-postgres-smoke PYTHON=python
         env:
           TEST_POSTGRES_URL: postgresql+asyncpg://alarm:postgres@127.0.0.1:5432/alarm
           YELK_IP_ALLOWLIST: 127.0.0.1/32
